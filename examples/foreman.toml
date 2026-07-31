@@ -1,0 +1,54 @@
+# foreman.toml — mode defaults plus the flag mapping for each agent kind.
+# install.sh seeds this as local/foreman.toml (gitignored); edit that copy, not this one.
+
+# Used when the project can't be inferred (running inside its main worktree usually suffices)
+default_project = "myproject"
+
+
+# ── channel: what `foreman say` enforces ──────────────────────────────────────
+# Newlines collapse to spaces (in a TUI a newline is enter, which submits half a message).
+# max_chars is a mechanical ceiling: collapsed to one line, a longer body won't fit the input
+# box. It says nothing about style — "point at paths, don't paste" lives in the templates.
+# Set 0 for no limit.
+[channel]
+max_chars    = 4000
+wait_idle_ms = 60000       # wait this long for them to be free; send anyway (--now skips it)
+
+
+# ── kind → how model / effort / tier become command-line flags ────────────────
+# Adding an agent kind means adding a section, not touching foreman. Values that
+# herdr agent start --kind accepts:
+# pi claude codex gemini cursor devin agy cline omp mastracode opencode copilot
+# kimi kiro droid amp grok hermes kilo qodercli maki
+
+[kinds.codex]
+args        = ["--dangerously-bypass-approvals-and-sandbox"]
+model_flag  = ["-c", "model={model}"]                       # overrides ~/.codex/config.toml
+effort_flag = ["-c", "model_reasoning_effort={effort}"]
+tier_flag   = ["-c", "service_tier={tier}"]                 # --tier fast / flex
+
+[kinds.claude]
+args        = ["--dangerously-skip-permissions"]
+model_flag  = ["--model", "{model}"]
+effort_flag = ["--effort", "{effort}"]                      # low|medium|high|xhigh|max
+tier_flag   = []                                            # no tier flag; empty means skipped
+
+
+# ── mode defaults ─────────────────────────────────────────────────────────────
+# Leaving model / effort empty (or deleting them) passes no flag, so the agent reads its own
+# config. The command line overrides these; under pair, --review-* overrides review alone.
+
+[modes.solo.agent]
+kind   = "codex"
+model  = "gpt-5.6-terra"
+effort = "xhigh"
+
+[modes.pair.impl]
+kind   = "codex"
+model  = "gpt-5.6-terra"
+effort = "xhigh"
+
+[modes.pair.review]
+kind   = "codex"
+model  = "gpt-5.6-terra"
+effort = "xhigh"

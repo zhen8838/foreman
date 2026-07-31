@@ -1,0 +1,48 @@
+# One <name>.toml per project, in local/ (gitignored — it is all machine paths).
+# The project is inferred by matching `main` against the git toplevel of the cwd; otherwise
+# pass --project <name>, or set default_project in local/foreman.toml.
+
+name          = "myproject"
+main          = "/home/me/src/myproject"      # main worktree, where the planner talks
+worktree_root = "/home/me/src"                # dispatched worktrees are created under here
+dir_prefix    = "myproject-"                  # directory name = dir_prefix + task
+base          = "main"                        # ref to branch off by default
+
+
+# ── where the rules are ───────────────────────────────────────────────────────
+# Free text, dropped into the prompt as {rules}. Point at the real source; don't copy the
+# rules themselves here, or the two will drift.
+rules = """
+The rules are in <worktree>/CONTRIBUTING.md, section "rules for agents". Read it first.
+"""
+
+# Commands that have to be typed out every time. Dropped into the prompt as {notes}; leave it
+# empty and the section disappears. Only put here what the rules file does not already say —
+# repeating it just creates a second place to keep in sync.
+notes = """
+Use this worktree's own .venv:
+  .venv/bin/pytest <target> -q -n 8
+  .venv/bin/ruff check <changed files>
+"""
+
+
+# ── hook ──────────────────────────────────────────────────────────────────────
+# Exactly one hook point: it runs after the worktree exists and the cwd is inside it, to set
+# the environment up (venv, symlinks, submodules). It receives FOREMAN_WORKTREE /
+# FOREMAN_MAIN / FOREMAN_TASK / FOREMAN_BRANCH / FOREMAN_MODE, with cwd at the new worktree.
+# A non-zero exit aborts the dispatch. Delete the section if you don't need it.
+[hooks]
+post_worktree = "local/myproject-post-worktree.sh"
+
+
+# ── templates (optional) ──────────────────────────────────────────────────────
+# Without this section templates are looked up in order, most specific first:
+#   local/templates/<project>/pair-impl.md    this project only
+#   local/templates/pair-impl.md              this machine
+#   templates/pair-impl.md                    shipped default
+# So changing a pair's opening prompt is: cp templates/pair-impl.md local/templates/, edit.
+# You only need the section below to point somewhere else — two variants of one template, say:
+# [templates]
+# solo        = "local/templates/quick-solo.md"
+# pair-impl   = "local/templates/myproject-impl.md"
+# pair-review = "local/templates/strict-review.md"

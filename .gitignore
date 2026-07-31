@@ -1,0 +1,7 @@
+# Real config, machine paths, hook scripts, template overrides — none of it is versioned
+local/
+
+# One ledger per job
+state/
+
+__pycache__/
