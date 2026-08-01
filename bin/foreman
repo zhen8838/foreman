@@ -476,7 +476,8 @@ def cmd_assign(args: argparse.Namespace) -> None:
         return
 
     write_job({"task": task, "project": project["name"], "mode": mode, "branch": branch,
-               "base": base, "path": str(wt), "plan": plan_abs, "brief": args.prompt or "",
+               "base": base, "path": str(wt), "main": str(main),
+               "plan": plan_abs, "brief": args.prompt or "",
                "workspace": ws, "agents": agents,
                "created": time.strftime("%Y-%m-%dT%H:%M:%S%z")})
     print()
@@ -657,22 +658,64 @@ def cmd_restart(args: argparse.Namespace) -> None:
 
 
 def cmd_done(args: argparse.Namespace) -> None:
+    """Tear a job down. Every step is best-effort on purpose.
+
+    Cleanup runs against a world that has usually moved on: agents quit, panes get closed by
+    hand, a workspace is gone. Treating any of that as an error is how a job becomes
+    unremovable — the first dead agent aborts the command, and the worktree it was supposed
+    to take with it stays behind with no ledger left to name it.
+    """
     task, _ = split_handle(args.task)
     job = read_job(task)
+
     for role, info in job["agents"].items():
-        herdr("agent", "send-keys", info["handle"], "esc")
-        time.sleep(0.5)
-        herdr("agent", "send-keys", info["handle"], "C-c", "C-c")
-        print(f"stopped {role}: {info['handle']}")
+        alive = run(["herdr", "agent", "get", info["handle"]], check=False).returncode == 0
+        if alive:
+            run(["herdr", "agent", "send-keys", info["handle"], "esc"], check=False)
+            time.sleep(0.5)
+            run(["herdr", "agent", "send-keys", info["handle"], "C-c", "C-c"], check=False)
+        print(f"{'stopped' if alive else 'already gone'}: {role} {info['handle']}")
     time.sleep(1)
+
+    path = Path(job["path"])
+    main = job.get("main")
+    if not main:
+        # ledgers written before `main` was recorded: fall back to the project config
+        try:
+            main = str(Path(load_project(job.get("project"), load_settings())["main"]).expanduser())
+        except Fail:
+            main = None
+
     if args.rm:
-        # removing the workspace takes the panes with it (remove wants --workspace, not a path)
-        herdr("worktree", "remove", "--workspace", job["workspace"], "--force")
-        print(f"removed worktree {job['path']}")
+        # removing the workspace takes its panes with it (remove wants --workspace, not a path)
+        rm = run(["herdr", "worktree", "remove", "--workspace", job["workspace"], "--force"],
+                 check=False)
+        if rm.returncode != 0 and path.exists() and main:
+            # the workspace was already gone; the git worktree is still ours to remove
+            run(["git", "-C", main, "worktree", "remove", "--force", str(path)], check=False)
+            run(["git", "-C", main, "worktree", "prune"], check=False)
+        print(f"removed worktree {path}" if not path.exists() else
+              f"could not remove worktree {path} — remove it by hand")
     else:
         for info in job["agents"].values():
             run(["herdr", "pane", "close", info["pane"]], check=False)
-        print(f"worktree and changes kept: {job['path']}")
+        print(f"worktree and changes kept: {path}")
+
+    if args.rm and not path.exists():
+        # a worktree removed without its branch leaves a name that blocks reusing the task.
+        # -d refuses to drop unmerged work, which is the behaviour we want; say so and let
+        # the human force it.
+        if not main:
+            print(f"kept branch {job['branch']} — could not locate the main worktree")
+        else:
+            drop = run(["git", "-C", main, "branch", "-d", job["branch"]], check=False)
+            if drop.returncode == 0:
+                print(f"deleted branch {job['branch']}")
+            else:
+                print(f"kept branch {job['branch']} — {(drop.stderr or '').strip().splitlines()[0]
+                                                       if drop.stderr else 'git refused'}\n"
+                      f"  git -C {main} branch -D {job['branch']}   # to drop it anyway")
+
     archive = JOBS.parent / "done"
     archive.mkdir(parents=True, exist_ok=True)
     job_path(task).rename(archive / f"{task}.json")
