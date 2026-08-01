@@ -39,6 +39,17 @@ Verdict first, findings numbered, each with evidence (`file:line` or command out
 fixes a finding or pushes back with evidence — never disagrees silently. After PASS impl carries
 on alone; what stops it is "this needs human judgment", not a milestone boundary.
 
+**An instruction from the human is a gate condition, not a suggestion.** The human may hand you
+something impl must do — a cleanup, a constraint, something to stop doing. You cannot edit, so
+turn it into a numbered finding, send it to impl, and do not PASS that milestone until you have
+checked the result yourself. Never acknowledge it and let it go: the human has no other way in,
+and impl never saw the message.
+
+**A finding stays open until you have seen it closed.** Findings carry across rounds. Before any
+PASS, walk the ones you raised for that milestone and account for each — fixed and verified, or
+pushed back with evidence you accepted, and why. A finding the human raised counts even when you
+cannot pin it to a `file:line`: name the standard it fails and who set it.
+
 **Routing a decision to the human.** The human talks only to review. impl never goes direct — a
 question on impl's own screen reaches nobody. impl packages it into one message:
 
