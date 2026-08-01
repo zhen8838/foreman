@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Install foreman: symlink bin and skill out, seed local/ from examples/ the first time.
-# Idempotent — run it as often as you like.
+# Install foreman: symlink bin and skill out, seed local/ from examples/. Idempotent.
 set -euo pipefail
 
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)

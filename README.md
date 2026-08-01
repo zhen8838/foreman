@@ -112,14 +112,24 @@ The remaining four are self-explanatory under `foreman --help`: `say` (message a
 `status` (who is paired with whom, PR and CI), `restart` (restart one role in place), `done`
 (wrap up).
 
-## Prompts
+## Prompts — changing what an agent is told
 
-Three templates, twenty-odd lines each, saying only **who you are** and **how you two work
-together**. Rendered, they read: identity (your pane and your partner's) → the task →
-`## Role` → `## Collaboration` → `## Rules` → `## Notes`. The last two are the free text from
-the project toml; leave one empty and its section disappears.
+Everything a dispatched agent knows arrives in one opening prompt, rendered from a template.
+Four of them:
 
-Changing a prompt means changing a template. They are looked up most specific first:
+```
+templates/solo.md            the lone agent
+templates/pair-impl.md       "you are impl"
+templates/pair-review.md     "you are review"
+templates/pair-protocol.md   the gate loop — spliced into both pair roles, so it can't drift
+```
+
+The role templates are short and say only **who you are**; the protocol holds **how the two of
+you work together**. Rendered, a prompt reads: identity (your pane and your partner's) → the
+task → `## Role` → `## Collaboration` → `## Rules` → `## Notes`. The last two are the free text
+from your project toml; leave one empty and its heading disappears.
+
+To change any of it, drop an edited copy into a layer that outranks the shipped one:
 
 ```
 local/templates/<project>/pair-impl.md    this project only
@@ -127,4 +137,6 @@ local/templates/pair-impl.md              this machine
 templates/pair-impl.md                    shipped default
 ```
 
-`cp` one into `local/` and edit; `--dry-run` prints which file it ended up using.
+So `cp templates/pair-protocol.md local/templates/` and edit is how you rewrite the gate
+protocol for every project on this machine. `--dry-run` prints which file it ended up using,
+and the full rendered prompt.

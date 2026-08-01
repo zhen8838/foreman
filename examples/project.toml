@@ -36,12 +36,8 @@ post_worktree = "local/myproject-post-worktree.sh"
 
 
 # ── templates (optional) ──────────────────────────────────────────────────────
-# Without this section templates are looked up in order, most specific first:
-#   local/templates/<project>/pair-impl.md    this project only
-#   local/templates/pair-impl.md              this machine
-#   templates/pair-impl.md                    shipped default
-# So changing a pair's opening prompt is: cp templates/pair-impl.md local/templates/, edit.
-# You only need the section below to point somewhere else — two variants of one template, say:
+# Templates are found by layered lookup without any config here; see the README. This section
+# only exists to point a name somewhere else — two variants of one template, say:
 # [templates]
 # solo        = "local/templates/quick-solo.md"
 # pair-impl   = "local/templates/myproject-impl.md"

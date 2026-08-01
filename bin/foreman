@@ -36,7 +36,7 @@ ROLE_SUFFIX = {"impl": "-impl", "review": "-rev"}
 MODE_ROLES = {"solo": ["solo"], "pair": ["impl", "review"]}
 
 
-# ── helpers ────────────────────────────────────────────────────────────────────
+# ── helpers ───────────────────────────────────────────────────────────────────
 
 
 class Fail(SystemExit):
@@ -85,7 +85,7 @@ def resolve(rel: str) -> Path:
     return override if override.exists() else REPO / rel
 
 
-# ── config ──────────────────────────────────────────────────────────────────────
+# ── config ────────────────────────────────────────────────────────────────────
 
 
 def load_settings() -> dict:
@@ -146,9 +146,8 @@ def agent_spec(settings: dict, mode: str, role: str, args: argparse.Namespace) -
         if value := override(field):
             spec[field] = value
     if spec["kind"] != default_kind:
-        # kind changed, so the default model/effort/tier belong to the old one (a codex model
-        # name means nothing to claude). Keep only what the command line asked for explicitly
-        # and let the new agent read its own config for the rest.
+        # the defaults belong to the old kind (a codex model name means nothing to claude),
+        # so keep only what was asked for explicitly and let the new agent read its own config
         for field in ("model", "effort", "tier"):
             if not override(field):
                 spec.pop(field, None)
@@ -197,7 +196,7 @@ def agent_argv(settings: dict, spec: dict) -> list[str]:
     return argv
 
 
-# ── templates ──────────────────────────────────────────────────────────────────────
+# ── templates ─────────────────────────────────────────────────────────────────
 
 
 def find_template(project: dict, name: str) -> Path:
@@ -253,7 +252,7 @@ def render(path: Path, fields: dict[str, str], protocol: str = "") -> str:
     return text.strip()
 
 
-# ── job ledger ──────────────────────────────────────────────────────────────────────
+# ── job ledger ────────────────────────────────────────────────────────────────
 
 
 def job_path(task: str) -> Path:
@@ -315,7 +314,7 @@ def pick_role(job: dict, role: str | None) -> str:
     return role
 
 
-# ── new ───────────────────────────────────────────────────────────────────────
+# ── assign ────────────────────────────────────────────────────────────────────
 
 
 def derive_task(args: argparse.Namespace) -> str:
@@ -373,8 +372,8 @@ def cmd_assign(args: argparse.Namespace) -> None:
     plan_abs = str((main / args.plan).resolve()) if args.plan else ""
     if plan_abs and not Path(plan_abs).exists():
         raise Fail(f"no such plan: {plan_abs}")
-    # The ledger keeps the bare path. The parenthetical only holds when there is a plan, and
-    # the renderer has no conditionals, so it is attached here instead.
+    # the renderer has no conditionals, so the note that only holds for a plan rides along
+    # with the plan; the ledger keeps the bare path
     plan_field = (plan_abs + "\n(Absolute; the plan directory may be gitignored. Golden "
                   "reference and evidence live beside it.)" if plan_abs else "")
 
@@ -399,7 +398,7 @@ def cmd_assign(args: argparse.Namespace) -> None:
     root_pane = res.get("root_pane", {}).get("pane_id") or \
         (res.get("panes") or [{}])[0].get("pane_id", "<pane>")
 
-    # 2. post_worktree hook — set the environment up (venv, symlinks, project's choice)
+    # 2. post_worktree hook — venv, symlinks, whatever the project needs
     hook = project.get("hooks", {}).get("post_worktree")
     if hook:
         hook_path = resolve(hook)
@@ -414,7 +413,7 @@ def cmd_assign(args: argparse.Namespace) -> None:
             if proc.returncode != 0:
                 raise Fail(f"post_worktree hook exited {proc.returncode} — nothing was dispatched")
 
-    # 3. panes: a pair needs a second one
+    # 3. panes — a pair needs a second
     panes = {MODE_ROLES[mode][0]: root_pane}
     if mode == "pair":
         p.step("split a pane for review", ["herdr", "pane", "split", "--pane", root_pane,
@@ -432,7 +431,7 @@ def cmd_assign(args: argparse.Namespace) -> None:
                 raise Fail(f"split done but no new pane showed up in workspace {ws}")
             panes["review"] = listed[-1]
 
-    # 4. start the agents, hand them their prompt
+    # 4. agents, and their opening prompt
     agents = {}
     for role in MODE_ROLES[mode]:
         handle = task + ROLE_SUFFIX.get(role, "")
@@ -448,9 +447,7 @@ def cmd_assign(args: argparse.Namespace) -> None:
             "task": task, "role": role, "self": info["handle"], "peer": peer,
             "worktree": str(wt), "branch": branch, "base": base, "main": str(main),
             "plan": plan_field, "brief": args.prompt or "", "mode": mode,
-            # a pane id is space:pane — the only address that won't cross wires
             "self_pane": info["pane"], "peer_pane": peer_info.get("pane", ""),
-            # the project's own two blocks: where the rules are, what else to say. Free text.
             "rules": project.get("rules", ""), "notes": project.get("notes", ""),
         }, protocol=shared)
         start_agent(info["handle"], info["pane"], info, settings, p)
@@ -539,7 +536,6 @@ def cmd_status(args: argparse.Namespace) -> None:
             statuses.append(state)
             spec = info["kind"] + (f"/{info['effort']}" if info.get("effort") else "")
             pair = " ⇄" if job["mode"] == "pair" else "  "
-            # pane id first: it is the address both messaging and attaching accept
             print(f"  {info['pane']:9}{pair} {role:7} {state:9} {spec:16} {handle}")
         if job["mode"] == "pair" and set(statuses) <= {"idle", "done"} and pr == "—":
             print("  ⚠ both idle and no PR — a handoff may have been dropped; take a look")
@@ -593,7 +589,7 @@ def cmd_say(args: argparse.Namespace) -> None:
         pane = job["agents"][peers[0]]["pane"]
         label = f"{pane} = {job['task']}.{peers[0]}"
 
-    # prefix names the speaker; a human sending from the main session gets none, so no
+    # the prefix names the speaker; no prefix means a human is talking
     prefix = f"[{me[0]['task']}.{me[1]}] " if me else ""
 
     # 1. collapse to one line: in a TUI a newline is enter, which submits half a message
@@ -601,11 +597,10 @@ def cmd_say(args: argparse.Namespace) -> None:
     if not text:
         raise Fail("empty message, not sending")
 
-    # 2. one mechanical ceiling only: collapsed to a single line, a long body gets truncated
-    #    by the TUI input box or swallowed into a `[Pasted text #N]` chip (see submit_prompt).
-    #    This is not a style rule. "Point at paths, don't paste content" is judgment and lives
-    #    in the templates: review is read-only, so it cannot "write a file and point at it",
-    #    and a hard stop would leave a legitimate findings list with nowhere to go.
+    # 2. one mechanical ceiling: on a single line, a long body is truncated by the input box
+    #    or swallowed into a `[Pasted text #N]` chip (see submit_prompt). Not a style rule —
+    #    review is read-only and cannot "write a file and point at it", so a stricter cap
+    #    would corner a legitimate findings list.
     if limit and len(text) > limit:
         raise Fail(
             f"message is {len(text)} chars, over the {limit} limit — one line that long "
@@ -616,11 +611,9 @@ def cmd_say(args: argparse.Namespace) -> None:
 
     body = text if text.startswith("[") else prefix + text
 
-    # 3. wait a little for them to be free (a message dropped mid-turn tends to be eaten),
-    #    but **send anyway when the wait runs out** — a command that hangs gets backgrounded
-    #    by codex on the sender's side, and then nobody sees the receipt.
-    #    No --until: the default matches idle/done/blocked, and codex reports done rather than
-    #    idle after a turn, so waiting on idle alone waits forever.
+    # 3. wait for them to be free — mid-turn messages get eaten — but send anyway on timeout:
+    #    a hanging command gets backgrounded by codex, losing the receipt. No --until, because
+    #    the default covers done as well, and codex reports done rather than idle after a turn
     if not args.now:
         run(["herdr", "agent", "wait", pane, "--timeout", str(wait_ms)], check=False)
     submit_prompt(pane, body)
@@ -684,19 +677,20 @@ def main() -> None:
     ap.add_argument("--version", action="version", version=f"foreman {VERSION}")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    # assign: pick the mode first, then that mode's own flags. The mode is a subcommand
-    # rather than a positional, so solo never shows --review-*, and a bare --kind stops
-    # meaning two different things depending on the mode.
+    # mode is a subcommand, not a positional: solo never shows --review-*, and a bare
+    # --kind stops meaning two different things depending on the mode
     asg = sub.add_parser("assign", help="hand out a plan, or a one-liner")
     modes = asg.add_subparsers(dest="mode", required=True)
 
     def add_common(sp, *, pair: bool) -> None:
         what = sp.add_mutually_exclusive_group(required=True)
         what.add_argument("--plan", help="plan file, relative to the project's main worktree")
-        what.add_argument("--prompt", help="say the job in a sentence, when there is no plan file")
-        sp.add_argument("--task", help="job name; derived from the plan filename, required with --prompt")
+        what.add_argument("--prompt", help="say the job in a sentence, if there is no plan")
+        sp.add_argument("--task",
+                        help="job name; from the plan filename, required with --prompt")
         sp.add_argument("--branch", help="branch name, defaults to the task name")
-        sp.add_argument("--dir", help="worktree path, defaults to {worktree_root}/{dir_prefix}{task}")
+        sp.add_argument("--dir",
+                        help="worktree path, default {worktree_root}/{dir_prefix}{task}")
         sp.add_argument("--base", help="ref to branch off, defaults to the project's base")
         sp.add_argument("--project")
         both = " (both agents)" if pair else ""
@@ -705,7 +699,8 @@ def main() -> None:
         sp.add_argument("--effort", help=f"effort: low / medium / high / xhigh / max{both}")
         sp.add_argument("--tier", help=f"service tier, e.g. codex's fast / flex{both}")
         if pair:
-            sp.add_argument("--review-kind", help="review only — a second model reviews with different blind spots")
+            sp.add_argument("--review-kind",
+                            help="review only — a second model has different blind spots")
             sp.add_argument("--review-model")
             sp.add_argument("--review-effort")
             sp.add_argument("--review-tier")
