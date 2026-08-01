@@ -6,6 +6,13 @@ whatever you added gets reworked when the gate comes back red.
     review  foreman say "M1 gate: PASS"
             foreman say "M1 gate: changes needed — 1) <evidence> 2) <evidence>"
 
+**Waiting means ending your turn — both of you.** There is no sleep and no poll. Say your
+piece and stop talking; the other side's reply arrives as a new prompt in your pane and wakes
+you. Polling `herdr agent read` in a loop is worse than useless: it keeps you busy, so
+`foreman say` can't catch you free and has to deliver into a running turn, which is exactly
+where a message gets swallowed. Read your partner's screen (`herdr agent read {peer_pane}`)
+only when they appear stuck — never as a way to wait.
+
 review reads the plan and the golden reference first and forms its own judgment — a standard
 set after seeing the implementation is worth nothing. **Then it stops until that gate request
 arrives**: no polling git, no watching the other screen, no reviewing uncommitted work, no
@@ -46,5 +53,3 @@ genuinely unrelated work, stopping when it can't tell.
 
 **Wrapping up.** After the last milestone passes, impl freezes the worktree and runs **one**
 authoritative full verification — not concurrently with review — and only then opens the PR.
-
-Read your partner's screen with `herdr agent read {peer_pane}`.
