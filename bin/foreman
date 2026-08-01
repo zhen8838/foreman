@@ -364,6 +364,17 @@ def cmd_assign(args: argparse.Namespace) -> None:
     mode = args.mode          # from the subcommand, so argparse already vouches for it
 
     task = derive_task(args)
+    # herdr rejects an agent name over 32 characters, and it does so at `agent start` —
+    # by which point the worktree exists, its venv is installed and the panes are split.
+    # The task name is what every handle is built from, so check it before any of that.
+    for role in MODE_ROLES[mode]:
+        handle = task + ROLE_SUFFIX.get(role, "")
+        if not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", handle):
+            raise Fail(f"handle {handle!r} ({len(handle)} chars) is not a name herdr accepts: "
+                       f"lowercase, digits, '-' or '_', 32 max.\n"
+                       f"        Pass a shorter --task (up to "
+                       f"{32 - max(len(s) for s in (ROLE_SUFFIX.get(r, '') for r in MODE_ROLES[mode]))}"
+                       f" characters for {mode}).")
     branch = args.branch or task
     main = Path(project["main"]).expanduser()
     wt = Path(args.dir).expanduser() if args.dir else (
