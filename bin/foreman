@@ -163,19 +163,22 @@ def submit_prompt(target: str, text: str, *, tries: int = 3, settle_s: float = 1
     fails silently: review never moves, the gate is entirely on review, so the pair decays
     into an ungated solo while `foreman status` looks fine (it only reports idle).
 
-    So check the state afterwards and send another enter while it is still idle. If it still
-    won't move, say so rather than pretend the prompt landed.
+    So check afterwards and send another enter until it moves. Only `working` proves the
+    prompt was taken: herdr treats `idle`, `done` and `blocked` alike as not-busy (that is
+    what `agent wait` matches without `--until`), and an agent that has just answered sits in
+    `done` rather than `idle`. Testing for `!= idle` therefore read "done" as success and
+    returned without ever sending the recovery enter — which is exactly the case that needs
+    it. An extra enter on an empty input box does nothing, so erring this way is free.
     """
     herdr("agent", "prompt", target, text)
     for _ in range(tries):
         time.sleep(settle_s)
-        info = herdr("agent", "get", target).get("agent", {})
-        if info.get("agent_status") != "idle":
+        if herdr("agent", "get", target).get("agent", {}).get("agent_status") == "working":
             return
         herdr("agent", "send-keys", target, "enter")
     sys.stderr.write(
-        f"foreman: {target} is still idle after the prompt — the text may be stuck in the "
-        f"input box.\n        Go look: herdr agent attach {target}\n")
+        f"foreman: {target} never started working after the prompt — the text may be stuck "
+        f"in the input box.\n        Go look: herdr agent attach {target}\n")
 
 
 def agent_argv(settings: dict, spec: dict) -> list[str]:
