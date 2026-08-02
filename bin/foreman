@@ -155,30 +155,45 @@ def agent_spec(settings: dict, mode: str, role: str, args: argparse.Namespace) -
 
 
 def submit_prompt(target: str, text: str, *, tries: int = 3, settle_s: float = 1.5) -> None:
-    """Submit a prompt, then confirm it was really submitted.
+    """Submit a prompt, then confirm a new turn actually started.
 
     For codex `herdr agent prompt` is fill-and-enter, done in one step. Claude Code is not:
-    a long multi-line body collapses into a `[Pasted text #N]` chip, the paste swallows the
-    enter, and the text sits in the input box — the agent has read nothing. In a pair that
-    fails silently: review never moves, the gate is entirely on review, so the pair decays
-    into an ungated solo while `foreman status` looks fine (it only reports idle).
+    a long body collapses into a `[Pasted text #N]` chip, the paste swallows the enter, and
+    the text sits in the input box with the agent having read nothing. In a pair that fails
+    silently — review never starts, the gate is entirely on review, and the result is an
+    ungated solo while `foreman status` looks fine.
 
-    So check afterwards and send another enter until it moves. Only `working` proves the
-    prompt was taken: herdr treats `idle`, `done` and `blocked` alike as not-busy (that is
-    what `agent wait` matches without `--until`), and an agent that has just answered sits in
-    `done` rather than `idle`. Testing for `!= idle` therefore read "done" as success and
-    returned without ever sending the recovery enter — which is exactly the case that needs
-    it. An extra enter on an empty input box does nothing, so erring this way is free.
+    What counts as proof is a **transition**, not a state. `working` on its own can be the
+    turn the agent was already running, and herdr lumps idle, done and blocked together as
+    not-busy (that is what `agent wait` matches without --until), so `!= idle` reads a
+    just-finished `done` as success. Since `say` waits with `agent wait`, it delivers exactly
+    when the recipient enters `done` — the reading that gets misjudged is the one it will
+    almost always see. `state_change_seq` only moves when the status really changes, so a
+    fresh `working` is one whose seq differs from the one taken before the prompt.
+
+    An agent already working when the prompt arrives is a case nothing here can settle:
+    Claude Code queues the message and its status never changes, so delivery neither proves
+    nor disproves itself. Send the enter regardless — on an empty box it does nothing — and
+    say plainly that this was not confirmed rather than claim it landed.
     """
+    before = herdr("agent", "get", target).get("agent", {})
+    seq = before.get("state_change_seq")
     herdr("agent", "prompt", target, text)
     for _ in range(tries):
         time.sleep(settle_s)
-        if herdr("agent", "get", target).get("agent", {}).get("agent_status") == "working":
+        info = herdr("agent", "get", target).get("agent", {})
+        if info.get("agent_status") == "working" and info.get("state_change_seq") != seq:
             return
         herdr("agent", "send-keys", target, "enter")
-    sys.stderr.write(
-        f"foreman: {target} never started working after the prompt — the text may be stuck "
-        f"in the input box.\n        Go look: herdr agent attach {target}\n")
+    if before.get("agent_status") == "working":
+        sys.stderr.write(
+            f"foreman: {target} was already working, so delivery could not be confirmed — "
+            f"the message is most likely queued.\n        Check with: herdr agent read "
+            f"{target}\n")
+    else:
+        sys.stderr.write(
+            f"foreman: {target} never started a new turn — the text may be stuck in the "
+            f"input box.\n        Go look: herdr agent attach {target}\n")
 
 
 def agent_argv(settings: dict, spec: dict) -> list[str]:
