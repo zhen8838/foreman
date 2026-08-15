@@ -381,6 +381,40 @@ class Plan:
             print(f"     {shlex.join(argv)}")
 
 
+def source_agent_env(project: dict, pane: str, values: dict[str, str], plan: Plan) -> None:
+    """Source a project environment in the pane before the agent process starts."""
+    hook = project.get("hooks", {}).get("source_env")
+    if not hook:
+        # Returning quietly makes a missing key indistinguishable from a key that did
+        # its job: the dry run lists what the project configured and never the gap.
+        plan.step("skip agent environment (no hooks.source_env — the agent gets a bare shell)")
+        return
+    hook_path = resolve(hook)
+    if not hook_path.exists():
+        raise Fail(f"hooks.source_env points at {hook_path}, which does not exist")
+
+    marker = f"__FOREMAN_ENV_READY_{os.getpid()}_{time.time_ns()}__"
+    # Keep the full marker out of the echoed command so wait-output cannot match too early.
+    split = len(marker) // 2
+    marker_expr = f"'{marker[:split]}'" + f"'{marker[split:]}'"
+    exports = "; ".join(
+        f"export {name}={shlex.quote(str(value))}" for name, value in values.items()
+    )
+    command = (f"{exports}; source {shlex.quote(str(hook_path))} && "
+               f"printf '%s\\n' {marker_expr}")
+    argv = ["herdr", "pane", "run", pane, command]
+    plan.step(f"source agent environment ({hook_path.name})", argv)
+    if plan.dry:
+        return
+
+    herdr("pane", "run", pane, command)
+    ready = run(["herdr", "pane", "wait-output", pane, "--source", "recent-unwrapped",
+                 "--match", marker, "--timeout", "60000"], check=False)
+    if ready.returncode != 0:
+        detail = ready.stderr.strip() or ready.stdout.strip()
+        raise Fail(f"source_env did not complete in pane {pane}: {detail}")
+
+
 def cmd_assign(args: argparse.Namespace) -> None:
     settings = load_settings()
     project = load_project(args.project, settings)
@@ -485,6 +519,11 @@ def cmd_assign(args: argparse.Namespace) -> None:
             # one key per role, so a project can say something different to each of the three
             **{f"{r}_notes": project.get(f"{r}_notes", "") for r in ("solo", "impl", "review")},
         }, protocol=shared)
+        source_agent_env(project, info["pane"], {
+            "FOREMAN_WORKTREE": str(wt), "FOREMAN_MAIN": str(main),
+            "FOREMAN_TASK": task, "FOREMAN_BRANCH": branch,
+            "FOREMAN_MODE": mode, "FOREMAN_ROLE": role,
+        }, p)
         start_agent(info["handle"], info["pane"], info, settings, p)
         p.step(f"prompt {info['handle']} (template {tpl})")
         if p.dry:
@@ -665,11 +704,17 @@ def cmd_restart(args: argparse.Namespace) -> None:
     role = pick_role(job, role)
     info = job["agents"][role]
     settings = load_settings()
+    project = load_project(job.get("project"), settings)
 
     herdr("agent", "send-keys", info["handle"], "esc")          # stop the current turn
     time.sleep(1)
     herdr("agent", "send-keys", info["handle"], "C-c", "C-c")   # quit the agent
     time.sleep(2)
+    source_agent_env(project, info["pane"], {
+        "FOREMAN_WORKTREE": job["path"], "FOREMAN_MAIN": job["main"],
+        "FOREMAN_TASK": job["task"], "FOREMAN_BRANCH": job["branch"],
+        "FOREMAN_MODE": job["mode"], "FOREMAN_ROLE": role,
+    }, Plan(False))
     start_agent(info["handle"], info["pane"], info, settings, Plan(False))
     note = args.note or ("Carry on with the plan. What is already in the worktree is your own "
                          "earlier work; pick up from there."

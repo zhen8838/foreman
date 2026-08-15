@@ -82,6 +82,7 @@ foreman/
 │  ├─ <project>.toml               where main is, where new worktrees go, per-role notes, hook.
 │  │                               One per project; add more and you can dispatch more projects
 │  ├─ <project>-post-worktree.sh   the one hook: runs after the worktree exists, cwd inside it
+│  ├─ <project>-worker-env.sh       optional: sourced before every Agent Session and restart
 │  └─ templates/                   (optional) override the shipped prompts, see Prompts below
 │
 └─ state/jobs/<task>.json          one ledger per job, written by foreman; ignore it
@@ -91,6 +92,10 @@ foreman/
 those **is written only in that hook script** (a non-zero exit aborts the dispatch). It is
 also the thing to run when you create a worktree by hand, which is why the steps should not be
 repeated in your project docs.
+
+Use `[hooks].source_env` for exports and shell functions that must be inherited by the agent.
+Foreman sources it in the pane after worktree setup and before `herdr agent start`, and repeats
+that initialization on `foreman restart`.
 
 `solo_notes`, `impl_notes` and `review_notes` in `<project>.toml` are free text and go into
 that role's opening prompt verbatim — point at the project's own rules file (**point, don't

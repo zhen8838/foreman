@@ -39,12 +39,14 @@ Read the evidence rather than re-running it; the suite belongs to impl.
 
 
 # ── hook ──────────────────────────────────────────────────────────────────────
-# Exactly one hook point: it runs after the worktree exists and the cwd is inside it, to set
-# the environment up (venv, symlinks, submodules). It receives FOREMAN_WORKTREE /
-# FOREMAN_MAIN / FOREMAN_TASK / FOREMAN_BRANCH / FOREMAN_MODE, with cwd at the new worktree.
-# A non-zero exit aborts the dispatch. Delete the section if you don't need it.
+# post_worktree runs as a subprocess after the worktree exists. source_env is sourced in each
+# pane immediately before its Agent Session starts (and again on restart), so exports and shell
+# functions remain available to the agent. Both receive FOREMAN_WORKTREE / FOREMAN_MAIN /
+# FOREMAN_TASK / FOREMAN_BRANCH / FOREMAN_MODE; source_env also receives FOREMAN_ROLE.
+# A non-zero result aborts dispatch. Delete either entry if it is not needed.
 [hooks]
 post_worktree = "local/myproject-post-worktree.sh"
+# source_env = "local/myproject-worker-env.sh"
 
 
 # ── templates (optional) ──────────────────────────────────────────────────────
