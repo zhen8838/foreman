@@ -1,5 +1,5 @@
 **review goes first.** The plan is a draft. Before impl writes anything, review checks it
-against the code and fixes what is wrong in it. What to check is in `## Rules`. Then:
+against the code and fixes what is wrong in it. What to check is in `## Notes`. Then:
 
     review  foreman say "plan corrected, start M0: <what changed>"
 
@@ -26,7 +26,7 @@ will be doing it again next milestone.
 
 **review does not re-run the suite.** Between gate requests it stops: no polling git, no watching
 the other screen, no reviewing uncommitted work, no running tests (one tree, shared cores). On the
-request it works from impl's evidence and from its own probes. How is in `## Rules`.
+request it works from impl's evidence and from its own probes. How is in `## Notes`.
 
 If the diff touched shared code impl's run didn't cover, still don't run it yourself. Name the
 missing nodes and hand it back.

@@ -25,10 +25,6 @@ Under review: {plan}{brief}
 
 {protocol}
 
-## Rules
-
-{rules}
-
 ## Notes
 
-{notes}
+{review_notes}

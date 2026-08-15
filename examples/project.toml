@@ -9,20 +9,32 @@ dir_prefix    = "myproject-"                  # directory name = dir_prefix + ta
 base          = "main"                        # ref to branch off by default
 
 
-# ── where the rules are ───────────────────────────────────────────────────────
-# Free text, dropped into the prompt as {rules}. Point at the real source; don't copy the
-# rules themselves here, or the two will drift.
-rules = """
-The rules are in <worktree>/CONTRIBUTING.md, section "rules for agents". Read it first.
-"""
+# ── what each role is told ────────────────────────────────────────────────────
+# One free-text block per role, dropped into that role's prompt as its `## Notes`. There is no
+# shared fallback: a role you leave out gets no notes at all and its heading disappears.
+# Point at the real rules file (**point, don't copy**, or the two will drift) and add the
+# commands that file doesn't already give you.
 
-# Commands that have to be typed out every time. Dropped into the prompt as {notes}; leave it
-# empty and the section disappears. Only put here what the rules file does not already say —
-# repeating it just creates a second place to keep in sync.
-notes = """
+solo_notes = """
+The rules are in <worktree>/CONTRIBUTING.md, section "rules for agents". Read it first.
+
 Use this worktree's own .venv:
   .venv/bin/pytest <target> -q -n 8
   .venv/bin/ruff check <changed files>
+"""
+
+impl_notes = """
+The rules are in <worktree>/CONTRIBUTING.md, section "rules for agents". Read it first.
+
+Use this worktree's own .venv:
+  .venv/bin/pytest <target> -q -n 8
+  .venv/bin/ruff check <changed files>
+"""
+
+review_notes = """
+The rules are in <worktree>/CONTRIBUTING.md, section "rules for agents". Read it first.
+
+Read the evidence rather than re-running it; the suite belongs to impl.
 """
 
 

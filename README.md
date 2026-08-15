@@ -79,7 +79,7 @@ foreman/
 │
 ├─ local/                          ★ the only layer you touch
 │  ├─ foreman.toml                 which agent each mode defaults to: kind / model / effort / tier
-│  ├─ <project>.toml               where main is, where new worktrees go, rules, notes, hook.
+│  ├─ <project>.toml               where main is, where new worktrees go, per-role notes, hook.
 │  │                               One per project; add more and you can dispatch more projects
 │  ├─ <project>-post-worktree.sh   the one hook: runs after the worktree exists, cwd inside it
 │  └─ templates/                   (optional) override the shipped prompts, see Prompts below
@@ -92,9 +92,11 @@ those **is written only in that hook script** (a non-zero exit aborts the dispat
 also the thing to run when you create a worktree by hand, which is why the steps should not be
 repeated in your project docs.
 
-`rules` and `notes` in `<project>.toml` are free text and go into the agent's opening prompt
-verbatim: `rules` points at the project's own rules file (**point, don't copy**), `notes`
-carries the commands that file doesn't already give you.
+`solo_notes`, `impl_notes` and `review_notes` in `<project>.toml` are free text and go into
+that role's opening prompt verbatim — point at the project's own rules file (**point, don't
+copy**) and add the commands that file doesn't already give you. One key per role and no
+shared fallback, so review can be told something impl isn't; a key you leave out means that
+role gets no notes and its heading disappears.
 
 ## Usage
 
@@ -126,8 +128,9 @@ templates/pair-protocol.md   the gate loop — spliced into both pair roles, so 
 
 The role templates are short and say only **who you are**; the protocol holds **how the two of
 you work together**. Rendered, a prompt reads: identity (your pane and your partner's) → the
-task → `## Role` → `## Collaboration` → `## Rules` → `## Notes`. The last two are the free text
-from your project toml; leave one empty and its heading disappears.
+task → `## Role` → `## Collaboration` → `## Notes`. The last one is the free text from your
+project toml — `{solo_notes}`, `{impl_notes}` or `{review_notes}`, one per template, so the
+three can be overridden apart; leave one empty and its heading disappears.
 
 To change any of it, drop an edited copy into a layer that outranks the shipped one:
 

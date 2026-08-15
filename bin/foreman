@@ -104,6 +104,11 @@ def load_project(name: str | None, settings: dict) -> dict:
     candidates = {}
     for path in project_files():
         cfg = load_toml(path)
+        # the one free-text block is per role now; a leftover rules/notes would say nothing
+        # to anybody, silently, so refuse instead of dropping it
+        if stale := [k for k in ("rules", "notes") if k in cfg]:
+            raise Fail(f"{path}: {', '.join(stale)} no longer reaches any template — split it "
+                       f"into solo_notes / impl_notes / review_notes, one per role")
         cfg.setdefault("name", path.stem)
         cfg["_path"] = str(path)
         candidates[cfg["name"]] = cfg
@@ -477,7 +482,8 @@ def cmd_assign(args: argparse.Namespace) -> None:
             "worktree": str(wt), "branch": branch, "base": base, "main": str(main),
             "plan": plan_field, "brief": args.prompt or "", "mode": mode,
             "self_pane": info["pane"], "peer_pane": peer_info.get("pane", ""),
-            "rules": project.get("rules", ""), "notes": project.get("notes", ""),
+            # one key per role, so a project can say something different to each of the three
+            **{f"{r}_notes": project.get(f"{r}_notes", "") for r in ("solo", "impl", "review")},
         }, protocol=shared)
         start_agent(info["handle"], info["pane"], info, settings, p)
         p.step(f"prompt {info['handle']} (template {tpl})")

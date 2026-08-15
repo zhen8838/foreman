@@ -19,10 +19,6 @@ Task: {plan}{brief}
 
 {protocol}
 
-## Rules
-
-{rules}
-
 ## Notes
 
-{notes}
+{impl_notes}
