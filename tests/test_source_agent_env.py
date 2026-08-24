@@ -83,6 +83,28 @@ class SourceAgentEnvTest(unittest.TestCase):
                     {"hooks": {"source_env": str(self.hook)}}, "w1:p1", {}, self.plan
                 )
 
+    def test_hook_status_uses_wait_match_when_snapshot_lags(self) -> None:
+        marker = f"__FOREMAN_ENV_{os.getpid()}_123__"
+
+        def fake_run(args, **_kwargs):
+            output = ""
+            if args[1:3] == ["pane", "wait-output"]:
+                output = json.dumps({"result": {"matched_line": f"{marker} OK 0"}})
+            return subprocess.CompletedProcess(args, 0, output, "")
+
+        globals_patch = {
+            "JOBS": self.root / "jobs",
+            "herdr": lambda *_args: {},
+            "run": fake_run,
+            "time": types.SimpleNamespace(time_ns=lambda: 123),
+        }
+        with patch.dict(self.source_agent_env.__globals__, globals_patch):
+            result = self.source_agent_env(
+                {"hooks": {"source_env": str(self.hook)}}, "w1:p1", {}, self.plan
+            )
+
+        self.assertEqual(result, [])
+
     def test_runtime_arguments_follow_configured_agent_arguments(self) -> None:
         start_agent = self.namespace["start_agent"]
         calls = []

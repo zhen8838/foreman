@@ -436,7 +436,13 @@ def source_agent_env(project: dict, pane: str, values: dict[str, str],
                  "--match", marker, "--timeout", timeout_ms], check=False)
     snapshot = run(["herdr", "pane", "read", pane, "--source", "recent-unwrapped",
                     "--lines", "30", "--format", "text"], check=False)
-    output = snapshot.stdout.strip()
+    matched_line = ""
+    try:
+        result = json.loads(ready.stdout or "{}").get("result", {})
+        matched_line = str(result.get("matched_line", ""))
+    except (AttributeError, json.JSONDecodeError):
+        pass
+    output = "\n".join(part for part in (matched_line, snapshot.stdout.strip()) if part)
     if ready.returncode != 0:
         detail = ready.stderr.strip() or ready.stdout.strip()
         tail = f"\n\nLast pane output:\n{output}" if output else ""
