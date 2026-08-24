@@ -801,6 +801,36 @@ def cmd_restart(args: argparse.Namespace) -> None:
           f"{'/' + info['effort'] if info.get('effort') else ''}, pane {info['pane']})")
 
 
+def run_pre_done_hook(project: dict, job: dict, remove_worktree: bool) -> None:
+    """Let a project preserve artifacts and release its own resources before teardown."""
+    hook = project.get("hooks", {}).get("pre_done")
+    if not hook:
+        return
+    hook_path = resolve(hook)
+    if not hook_path.exists():
+        raise Fail(f"hooks.pre_done points at {hook_path}, which does not exist")
+
+    worktree = Path(job["path"])
+    main = Path(job["main"]) if job.get("main") else worktree
+    cwd = worktree if worktree.is_dir() else main
+    env = {
+        "FOREMAN_WORKTREE": str(worktree),
+        "FOREMAN_MAIN": str(main),
+        "FOREMAN_TASK": job["task"],
+        "FOREMAN_BRANCH": job["branch"],
+        "FOREMAN_MODE": job["mode"],
+        "FOREMAN_PROMPT": job.get("brief", ""),
+        "FOREMAN_PLAN": job.get("plan", ""),
+        "FOREMAN_REMOVE_WORKTREE": "1" if remove_worktree else "0",
+        "FOREMAN_AGENTS_JSON": json.dumps(job["agents"], separators=(",", ":")),
+    }
+    proc = subprocess.run([str(hook_path)], cwd=cwd, text=True, check=False,
+                          env={**os.environ, **env})
+    if proc.returncode != 0:
+        raise Fail(f"pre_done hook {hook_path.name} exited {proc.returncode} — "
+                   "pane, worktree and ledger were kept")
+
+
 def cmd_done(args: argparse.Namespace) -> None:
     """Tear a job down. Every step is best-effort on purpose.
 
@@ -811,6 +841,7 @@ def cmd_done(args: argparse.Namespace) -> None:
     """
     task, _ = split_handle(args.task)
     job = read_job(task)
+    project = load_project(job.get("project"), load_settings())
 
     for role, info in job["agents"].items():
         # By pane, so a session someone restarted by hand is stopped rather than reported
@@ -822,6 +853,10 @@ def cmd_done(args: argparse.Namespace) -> None:
             run(["herdr", "agent", "send-keys", info["pane"], "C-c", "C-c"], check=False)
         print(f"{'stopped' if alive else 'already gone'}: {role} {info['handle']}")
     time.sleep(1)
+
+    # Sessions have now flushed, while panes, worktree and ledger still exist. A project can
+    # archive transcripts or release containers here; failure must stop before data is lost.
+    run_pre_done_hook(project, job, args.rm)
 
     path = Path(job["path"])
     main = job.get("main")

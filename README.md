@@ -81,8 +81,9 @@ foreman/
 │  ├─ foreman.toml                 which agent each mode defaults to: kind / model / effort / tier
 │  ├─ <project>.toml               where main is, where new worktrees go, per-role notes, hook.
 │  │                               One per project; add more and you can dispatch more projects
-│  ├─ <project>-post-worktree.sh   the one hook: runs after the worktree exists, cwd inside it
-│  ├─ <project>-worker-env.sh       optional: sourced before every Agent Session and restart
+│  ├─ <project>-post-worktree.sh   optional: runs after the worktree exists, cwd inside it
+│  ├─ <project>-worker-env.sh      optional: sourced before every Agent Session and restart
+│  ├─ <project>-pre-done.sh        optional: preserves artifacts and releases project resources
 │  └─ templates/                   (optional) override the shipped prompts, see Prompts below
 │
 └─ state/jobs/<task>.json          one ledger per job, written by foreman; ignore it
@@ -101,6 +102,13 @@ JSON array of strings to that file; Foreman appends those arguments to this agen
 command. This is intended for runtime values discovered by the hook, such as a container's
 dynamic SSH endpoint. Set `source_env_timeout_ms` when setup can legitimately take longer than
 the default 60 seconds. Hook failure is reported immediately with the pane's recent output.
+
+Use `[hooks].pre_done` for project-specific finish work. `foreman done` first stops the agents
+so their sessions are flushed, then runs this hook while panes, worktree and ledger still
+exist. It receives `FOREMAN_REMOVE_WORKTREE=1` for `done --rm` and a JSON description of the
+roles in `FOREMAN_AGENTS_JSON`. Archive transcripts, move durable artifacts and remove
+containers here. A non-zero exit stops teardown; Foreman keeps the pane, worktree and ledger
+so the finish step can be fixed and retried.
 
 `solo_notes`, `impl_notes` and `review_notes` in `<project>.toml` are free text and go into
 that role's opening prompt verbatim — point at the project's own rules file (**point, don't
