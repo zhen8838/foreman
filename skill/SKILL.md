@@ -11,7 +11,7 @@ Once settled, the work goes to agents in other worktrees — that is all this sk
 ## Usage
 
 ```
-/foreman <plan.md> [solo|pair] [codex|claude] [effort]
+/foreman <plan.md> [solo|pair] [codex|claude|pi] [effort]
 /foreman "one sentence saying what to do" [solo|pair]
 ```
 
@@ -31,7 +31,9 @@ foreman assign <solo|pair> (--plan <file> | --prompt "one sentence") \
   `feat/` `fix/` `test/` `docs/` `refactor/` keyed off the plan's `type:` frontmatter —
   **read the plan and compose one yourself**. That is your judgment to make, not config.
 - **Kind and effort**: pass nothing unless the user asked, and let the mode defaults in
-  `local/foreman.toml` apply.
+  `local/foreman.toml` apply. For Pi, select Claude with
+  `--model anthropic/<model-id>` or GPT with `--model openai-codex/<model-id>`; Foreman maps
+  `--effort` to Pi's `--thinking` flag.
 - Unsure what a dispatch will do? `--dry-run` prints every herdr command and the **fully
   rendered prompts**, and executes nothing.
 

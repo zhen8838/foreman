@@ -109,8 +109,18 @@ role gets no notes and its heading disappears.
 foreman assign pair --plan docs/plans/13-installed-surface-smoke.md
 foreman assign solo --prompt "replace X with Y" --task chore-xy
 
+# Pi can use either provider without changing the mode default:
+foreman assign solo --prompt "replace X with Y" --task chore-xy \
+  --kind pi --model anthropic/<claude-model-id> --effort xhigh
+foreman assign solo --prompt "replace X with Y" --task chore-xy \
+  --kind pi --model openai-codex/<gpt-model-id> --effort xhigh
+
 foreman assign pair --plan <file> --dry-run    # see what it would do, and the exact prompts
 ```
+
+`--kind pi` is a per-dispatch override; it does not change `[modes.solo.agent]`.
+Pi accepts `provider/model` through Foreman's existing `--model` option, so Claude and GPT
+selection stays explicit. Omit `--model` to let Pi use its own saved provider/model.
 
 Pick the mode first, then that mode's flags (`solo` never shows `--review-*`). The work itself
 is `--plan <file>` or `--prompt "one sentence"`. It reports both pane ids when it's done.

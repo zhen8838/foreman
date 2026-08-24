@@ -33,6 +33,12 @@ model_flag  = ["--model", "{model}"]
 effort_flag = ["--effort", "{effort}"]                      # low|medium|high|xhigh|max
 tier_flag   = []                                            # no tier flag; empty means skipped
 
+[kinds.pi]
+args        = []
+model_flag  = ["--model", "{model}"]                        # provider/model, e.g. anthropic/... or openai-codex/...
+effort_flag = ["--thinking", "{effort}"]                    # off|minimal|low|medium|high|xhigh|max
+tier_flag   = []
+
 
 # ── mode defaults ─────────────────────────────────────────────────────────────
 # Leaving model / effort empty (or deleting them) passes no flag, so the agent reads its own
