@@ -42,11 +42,15 @@ Read the evidence rather than re-running it; the suite belongs to impl.
 # post_worktree runs as a subprocess after the worktree exists. source_env is sourced in each
 # pane immediately before its Agent Session starts (and again on restart), so exports and shell
 # functions remain available to the agent. Both receive FOREMAN_WORKTREE / FOREMAN_MAIN /
-# FOREMAN_TASK / FOREMAN_BRANCH / FOREMAN_MODE; source_env also receives FOREMAN_ROLE.
-# A non-zero result aborts dispatch. Delete either entry if it is not needed.
+# FOREMAN_TASK / FOREMAN_BRANCH / FOREMAN_MODE / FOREMAN_PROMPT / FOREMAN_PLAN; source_env
+# also receives FOREMAN_ROLE and FOREMAN_AGENT_ARGS_FILE. It may write a JSON string array to
+# the latter to append runtime arguments to this agent's launch command. A non-zero result
+# aborts dispatch and Foreman includes recent pane output in the error. Delete either entry if
+# it is not needed.
 [hooks]
 post_worktree = "local/myproject-post-worktree.sh"
 # source_env = "local/myproject-worker-env.sh"
+# source_env_timeout_ms = 60000
 
 
 # ── templates (optional) ──────────────────────────────────────────────────────

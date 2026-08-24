@@ -162,11 +162,10 @@ def agent_spec(settings: dict, mode: str, role: str, args: argparse.Namespace) -
 def submit_prompt(target: str, text: str, *, tries: int = 3, settle_s: float = 1.5) -> None:
     """Submit a prompt, then confirm a new turn actually started.
 
-    For codex `herdr agent prompt` is fill-and-enter, done in one step. Claude Code is not:
-    a long body collapses into a `[Pasted text #N]` chip, the paste swallows the enter, and
-    the text sits in the input box with the agent having read nothing. In a pair that fails
-    silently — review never starts, the gate is entirely on review, and the result is an
-    ungated solo while `foreman status` looks fine.
+    For codex `herdr agent prompt` is fill-and-enter, done in one step. Other interactive
+    agents are not always so predictable: a paste can swallow the enter and leave the text
+    in the input box. In a pair that fails silently — review never starts, the gate is
+    entirely on review, and the result is an ungated solo while `foreman status` looks fine.
 
     What counts as proof is a **transition**, not a state. `working` on its own can be the
     turn the agent was already running, and herdr lumps idle, done and blocked together as
@@ -174,7 +173,8 @@ def submit_prompt(target: str, text: str, *, tries: int = 3, settle_s: float = 1
     just-finished `done` as success. Since `say` waits with `agent wait`, it delivers exactly
     when the recipient enters `done` — the reading that gets misjudged is the one it will
     almost always see. `state_change_seq` only moves when the status really changes, so a
-    fresh `working` is one whose seq differs from the one taken before the prompt.
+    fresh `working` is one whose seq differs from the one taken before the prompt. Agent
+    startup can also produce that transition, so send an explicit Enter before observing it.
 
     An agent already working when the prompt arrives is a case nothing here can settle:
     Claude Code queues the message and its status never changes, so delivery neither proves
@@ -184,12 +184,17 @@ def submit_prompt(target: str, text: str, *, tries: int = 3, settle_s: float = 1
     before = herdr("agent", "get", target).get("agent", {})
     seq = before.get("state_change_seq")
     herdr("agent", "prompt", target, text)
+    # Safe for agents whose prompt command already submitted: Enter on an empty input is a
+    # no-op. For Pi/Claude this also closes the paste-before-enter race before startup can
+    # masquerade as proof that the turn began.
+    herdr("agent", "send-keys", target, "enter")
     for _ in range(tries):
         time.sleep(settle_s)
         info = herdr("agent", "get", target).get("agent", {})
         if info.get("agent_status") == "working" and info.get("state_change_seq") != seq:
             return
-        herdr("agent", "send-keys", target, "enter")
+        if _ + 1 < tries:
+            herdr("agent", "send-keys", target, "enter")
     if before.get("agent_status") == "working":
         sys.stderr.write(
             f"foreman: {target} was already working, so delivery could not be confirmed — "
@@ -349,10 +354,11 @@ def derive_task(args: argparse.Namespace) -> str:
     raise Fail("--prompt needs --task: there is no plan filename to derive it from")
 
 
-def start_agent(handle: str, pane: str, spec: dict, settings: dict, plan: Plan) -> None:
+def start_agent(handle: str, pane: str, spec: dict, settings: dict, plan: Plan,
+                runtime_args: list[str] | None = None) -> None:
     argv = ["agent", "start", handle, "--kind", spec["kind"], "--pane", pane,
             "--timeout", "60000"]
-    extra = agent_argv(settings, spec)
+    extra = [*agent_argv(settings, spec), *(runtime_args or [])]
     if extra:
         argv += ["--", *extra]
     plan.step(f"start {handle} ({spec['kind']}"
@@ -381,38 +387,87 @@ class Plan:
             print(f"     {shlex.join(argv)}")
 
 
-def source_agent_env(project: dict, pane: str, values: dict[str, str], plan: Plan) -> None:
-    """Source a project environment in the pane before the agent process starts."""
+def source_agent_env(project: dict, pane: str, values: dict[str, str],
+                     plan: Plan) -> list[str]:
+    """Source a project environment and collect optional per-agent CLI arguments.
+
+    A source hook can write a JSON string array to ``$FOREMAN_AGENT_ARGS_FILE``. This is
+    useful for values that only exist after worktree setup, such as a container's dynamic
+    SSH endpoint. The hook still runs in the pane so its exports and ``cd`` survive.
+    """
     hook = project.get("hooks", {}).get("source_env")
     if not hook:
         # Returning quietly makes a missing key indistinguishable from a key that did
         # its job: the dry run lists what the project configured and never the gap.
         plan.step("skip agent environment (no hooks.source_env — the agent gets a bare shell)")
-        return
+        return []
     hook_path = resolve(hook)
     if not hook_path.exists():
         raise Fail(f"hooks.source_env points at {hook_path}, which does not exist")
 
-    marker = f"__FOREMAN_ENV_READY_{os.getpid()}_{time.time_ns()}__"
+    marker = f"__FOREMAN_ENV_{os.getpid()}_{time.time_ns()}__"
+    args_file = JOBS / f".agent-args-{os.getpid()}-{time.time_ns()}.json"
+    values = {**values, "FOREMAN_AGENT_ARGS_FILE": str(args_file)}
     # Keep the full marker out of the echoed command so wait-output cannot match too early.
     split = len(marker) // 2
     marker_expr = f"'{marker[:split]}'" + f"'{marker[split:]}'"
     exports = "; ".join(
         f"export {name}={shlex.quote(str(value))}" for name, value in values.items()
     )
-    command = (f"{exports}; source {shlex.quote(str(hook_path))} && "
-               f"printf '%s\\n' {marker_expr}")
+    command = (
+        f"{exports}; "
+        f"if source {shlex.quote(str(hook_path))}; then _foreman_status=OK; "
+        f"else _foreman_rc=$?; _foreman_status=FAIL; fi; "
+        f"printf '%s %s %s\\n' {marker_expr} \"$_foreman_status\" "
+        f"\"${{_foreman_rc:-0}}\""
+    )
     argv = ["herdr", "pane", "run", pane, command]
     plan.step(f"source agent environment ({hook_path.name})", argv)
     if plan.dry:
-        return
+        return []
 
+    timeout_value = project.get("hooks", {}).get("source_env_timeout_ms", 60000)
+    if isinstance(timeout_value, bool) or not isinstance(timeout_value, int) or timeout_value <= 0:
+        raise Fail("hooks.source_env_timeout_ms must be a positive integer")
+    timeout_ms = str(timeout_value)
+    JOBS.mkdir(parents=True, exist_ok=True)
     herdr("pane", "run", pane, command)
     ready = run(["herdr", "pane", "wait-output", pane, "--source", "recent-unwrapped",
-                 "--match", marker, "--timeout", "60000"], check=False)
+                 "--match", marker, "--timeout", timeout_ms], check=False)
+    snapshot = run(["herdr", "pane", "read", pane, "--source", "recent-unwrapped",
+                    "--lines", "30", "--format", "text"], check=False)
+    output = snapshot.stdout.strip()
     if ready.returncode != 0:
         detail = ready.stderr.strip() or ready.stdout.strip()
-        raise Fail(f"source_env did not complete in pane {pane}: {detail}")
+        tail = f"\n\nLast pane output:\n{output}" if output else ""
+        args_file.unlink(missing_ok=True)
+        raise Fail(f"source_env timed out after {int(timeout_ms) / 1000:g}s in pane "
+                   f"{pane}: {detail}{tail}")
+
+    match = re.search(rf"{re.escape(marker)} (OK|FAIL) ([0-9]+)", output)
+    if not match:
+        args_file.unlink(missing_ok=True)
+        raise Fail(f"source_env returned an unreadable status in pane {pane}.\n\n"
+                   f"Last pane output:\n{output}")
+    if match.group(1) == "FAIL":
+        args_file.unlink(missing_ok=True)
+        lines = [line for line in output.splitlines() if marker not in line]
+        detail = "\n".join(lines[-12:]).strip()
+        suffix = f"\n\nLast pane output:\n{detail}" if detail else ""
+        raise Fail(f"source_env hook {hook_path.name} failed with exit "
+                   f"{match.group(2)} in pane {pane}{suffix}")
+
+    if not args_file.exists():
+        return []
+    try:
+        runtime_args = json.loads(args_file.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise Fail(f"source_env wrote invalid agent arguments to {args_file}: {exc}") from exc
+    finally:
+        args_file.unlink(missing_ok=True)
+    if not isinstance(runtime_args, list) or not all(isinstance(arg, str) for arg in runtime_args):
+        raise Fail("source_env agent arguments must be a JSON array of strings")
+    return runtime_args
 
 
 def cmd_assign(args: argparse.Namespace) -> None:
@@ -476,7 +531,8 @@ def cmd_assign(args: argparse.Namespace) -> None:
         if not p.dry:
             env = {"FOREMAN_WORKTREE": str(wt), "FOREMAN_MAIN": str(main),
                    "FOREMAN_TASK": task, "FOREMAN_BRANCH": branch,
-                   "FOREMAN_MODE": mode}
+                   "FOREMAN_MODE": mode, "FOREMAN_PROMPT": args.prompt or "",
+                   "FOREMAN_PLAN": plan_abs}
             proc = subprocess.run([str(hook_path)], cwd=wt, text=True, env={**os.environ, **env})
             if proc.returncode != 0:
                 raise Fail(f"post_worktree hook exited {proc.returncode} — nothing was dispatched")
@@ -519,12 +575,13 @@ def cmd_assign(args: argparse.Namespace) -> None:
             # one key per role, so a project can say something different to each of the three
             **{f"{r}_notes": project.get(f"{r}_notes", "") for r in ("solo", "impl", "review")},
         }, protocol=shared)
-        source_agent_env(project, info["pane"], {
+        runtime_args = source_agent_env(project, info["pane"], {
             "FOREMAN_WORKTREE": str(wt), "FOREMAN_MAIN": str(main),
             "FOREMAN_TASK": task, "FOREMAN_BRANCH": branch,
             "FOREMAN_MODE": mode, "FOREMAN_ROLE": role,
+            "FOREMAN_PROMPT": args.prompt or "", "FOREMAN_PLAN": plan_abs,
         }, p)
-        start_agent(info["handle"], info["pane"], info, settings, p)
+        start_agent(info["handle"], info["pane"], info, settings, p, runtime_args)
         p.step(f"prompt {info['handle']} (template {tpl})")
         if p.dry:
             print("     ┌─ prompt " + "─" * 58)
@@ -590,10 +647,14 @@ def cmd_status(args: argparse.Namespace) -> None:
         print("no live jobs")
         return
 
+    # Keyed by pane, not by name. `assign` binds the name with `herdr agent start`, and a
+    # session restarted by hand in that pane never binds it again: the pane keeps working
+    # and the name is simply gone. Looking an agent up by name reports a live agent as
+    # "not running", which is the one reading that makes a dropped handoff invisible.
     live = {}
     for a in herdr("agent", "list").get("agents", []):
-        if a.get("name"):
-            live[a["name"]] = a
+        if a.get("pane_id"):
+            live[a["pane_id"]] = a
 
     for job in jobs:
         path = Path(job["path"])
@@ -606,12 +667,16 @@ def cmd_status(args: argparse.Namespace) -> None:
         statuses = []
         for role, info in job["agents"].items():
             handle = info["handle"]
-            agent = live.get(handle)
+            agent = live.get(info["pane"])
             state = agent["agent_status"] if agent else "not running"
             statuses.append(state)
             spec = info["kind"] + (f"/{info['effort']}" if info.get("effort") else "")
+            # Whoever restarted the pane may have started a different agent than the one
+            # dispatched. Say so: `restart` relaunches from the ledger and would replace it.
+            running = agent.get("agent") if agent else None
+            note = f"  ⚠ pane runs {running}" if running and running != info["kind"] else ""
             pair = " ⇄" if job["mode"] == "pair" else "  "
-            print(f"  {info['pane']:9}{pair} {role:7} {state:9} {spec:16} {handle}")
+            print(f"  {info['pane']:9}{pair} {role:7} {state:9} {spec:16} {handle}{note}")
         if job["mode"] == "pair" and set(statuses) <= {"idle", "done"} and pr == "—":
             print("  ⚠ both idle and no PR — a handoff may have been dropped; take a look")
 
@@ -706,16 +771,20 @@ def cmd_restart(args: argparse.Namespace) -> None:
     settings = load_settings()
     project = load_project(job.get("project"), settings)
 
-    herdr("agent", "send-keys", info["handle"], "esc")          # stop the current turn
+    # Address the pane, not the handle: a hand-restarted session has no name left, and
+    # raising here would abort before `start_agent` -- which is the very step that binds
+    # the name back on.
+    herdr("agent", "send-keys", info["pane"], "esc")            # stop the current turn
     time.sleep(1)
-    herdr("agent", "send-keys", info["handle"], "C-c", "C-c")   # quit the agent
+    herdr("agent", "send-keys", info["pane"], "C-c", "C-c")     # quit the agent
     time.sleep(2)
-    source_agent_env(project, info["pane"], {
+    runtime_args = source_agent_env(project, info["pane"], {
         "FOREMAN_WORKTREE": job["path"], "FOREMAN_MAIN": job["main"],
         "FOREMAN_TASK": job["task"], "FOREMAN_BRANCH": job["branch"],
         "FOREMAN_MODE": job["mode"], "FOREMAN_ROLE": role,
+        "FOREMAN_PROMPT": job.get("brief", ""), "FOREMAN_PLAN": job.get("plan", ""),
     }, Plan(False))
-    start_agent(info["handle"], info["pane"], info, settings, Plan(False))
+    start_agent(info["handle"], info["pane"], info, settings, Plan(False), runtime_args)
     note = args.note or ("Carry on with the plan. What is already in the worktree is your own "
                          "earlier work; pick up from there."
                          if role != "review" else
@@ -738,11 +807,13 @@ def cmd_done(args: argparse.Namespace) -> None:
     job = read_job(task)
 
     for role, info in job["agents"].items():
-        alive = run(["herdr", "agent", "get", info["handle"]], check=False).returncode == 0
+        # By pane, so a session someone restarted by hand is stopped rather than reported
+        # gone and left running while its pane is closed out from under it.
+        alive = run(["herdr", "agent", "get", info["pane"]], check=False).returncode == 0
         if alive:
-            run(["herdr", "agent", "send-keys", info["handle"], "esc"], check=False)
+            run(["herdr", "agent", "send-keys", info["pane"], "esc"], check=False)
             time.sleep(0.5)
-            run(["herdr", "agent", "send-keys", info["handle"], "C-c", "C-c"], check=False)
+            run(["herdr", "agent", "send-keys", info["pane"], "C-c", "C-c"], check=False)
         print(f"{'stopped' if alive else 'already gone'}: {role} {info['handle']}")
     time.sleep(1)
 

@@ -95,7 +95,12 @@ repeated in your project docs.
 
 Use `[hooks].source_env` for exports and shell functions that must be inherited by the agent.
 Foreman sources it in the pane after worktree setup and before `herdr agent start`, and repeats
-that initialization on `foreman restart`.
+that initialization on `foreman restart`. It receives `FOREMAN_PROMPT`, `FOREMAN_PLAN` and a
+`FOREMAN_AGENT_ARGS_FILE` path in addition to the normal worktree fields. A hook may write a
+JSON array of strings to that file; Foreman appends those arguments to this agent's launch
+command. This is intended for runtime values discovered by the hook, such as a container's
+dynamic SSH endpoint. Set `source_env_timeout_ms` when setup can legitimately take longer than
+the default 60 seconds. Hook failure is reported immediately with the pane's recent output.
 
 `solo_notes`, `impl_notes` and `review_notes` in `<project>.toml` are free text and go into
 that role's opening prompt verbatim — point at the project's own rules file (**point, don't
