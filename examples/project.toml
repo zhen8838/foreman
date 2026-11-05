@@ -39,10 +39,10 @@ Read the evidence rather than re-running it; the suite belongs to impl.
 
 
 # ── hook ──────────────────────────────────────────────────────────────────────
-# post_worktree runs after the worktree exists. source_env is sourced in each pane immediately
-# before its Agent Session starts (and again on restart). pre_done runs after agents stop but
-# before panes, worktree or ledger are removed, so it can archive sessions and release project
-# resources. All receive FOREMAN_WORKTREE / FOREMAN_MAIN / FOREMAN_TASK / FOREMAN_BRANCH /
+# post_worktree runs after the worktree exists. source_env is sourced by each role's launch
+# script, in the shell that then execs the agent (and again on restart). pre_done runs after
+# agents stop but before their terminals, the worktree or the ledger are removed, so it can
+# archive sessions and release project resources. All receive FOREMAN_WORKTREE / FOREMAN_MAIN / FOREMAN_TASK / FOREMAN_BRANCH /
 # FOREMAN_MODE / FOREMAN_PROMPT / FOREMAN_PLAN. source_env also receives FOREMAN_ROLE and
 # FOREMAN_AGENT_ARGS_FILE; pre_done receives FOREMAN_REMOVE_WORKTREE and FOREMAN_AGENTS_JSON.
 # Any non-zero hook result aborts its lifecycle operation.

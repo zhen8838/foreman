@@ -34,17 +34,18 @@ foreman assign <solo|pair> (--plan <file> | --prompt "one sentence") \
   `local/foreman.toml` apply. For Pi, select Claude with
   `--model anthropic/<model-id>` or GPT with `--model openai-codex/<model-id>`; Foreman maps
   `--effort` to Pi's `--thinking` flag.
-- Unsure what a dispatch will do? `--dry-run` prints every herdr command and the **fully
-  rendered prompts**, and executes nothing.
+- Unsure what a dispatch will do? `--dry-run` prints every hc command, each role's launch
+  script and the **fully rendered prompts**, and executes nothing.
 
-Report the handles and `herdr agent attach <handle>` back to the user.
+Report the handles back to the user: each job is a space of its own in herdr-app, one tab per
+agent, and `hc attach <handle>` takes one over from any terminal on this machine.
 
 ## The other commands
 
 ```bash
 foreman status [<task>]         # who is paired with whom, doing what, dirty count, PR and CI
 foreman restart <task>[.rev]    # restart one role in place, same model and permissions
-foreman done <task> [--rm]      # wrap up; without --rm only the panes close, the work stays
+foreman done <task> [--rm]      # wrap up; without --rm only the terminals close, the work stays
 ```
 
 ## Messages don't go through you
@@ -52,15 +53,14 @@ foreman done <task> [--rm]      # wrap up; without --rm only the panes close, th
 When the user wants to talk to a dispatched agent, they do it directly:
 
 ```bash
-foreman say w2E:p2 "..."        # collapsed to one line, waits for them, refuses a huge body
-foreman say <task>.rev "..."    # convenience form, same thing
-herdr agent read w2E:p2         # watch its screen
-herdr agent attach w2E:p2       # take it over (leave with C-c twice)
+foreman say <task>.rev "..."    # waits for them, refuses a huge body
+hc read <task>-rev              # watch its screen
+hc attach <task>-rev            # take it over (leave with Ctrl+\)
 ```
 
-**Always address by pane id (`space:pane`)**, taken from `foreman status`. Agent frameworks
-rewrite window titles to the current task, and several worktrees of one repo end up sharing a
-title — addressing by name is guaranteed to misdeliver eventually.
+**Address by name** — `<task>`, `<task>-impl`, `<task>-rev` — as `foreman status` lists them.
+foreman sets that name on the terminal; the agent cannot change it, and no two live terminals
+share one. The address (`t1b`) works too, but a `restart` gives the role a new one.
 
 Don't relay. Hand the command to the user.
 

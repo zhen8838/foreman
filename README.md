@@ -6,7 +6,8 @@ merge.
 
 Your main worktree is never touched by anyone else, several jobs run genuinely in parallel,
 and each one keeps its progress, its conversation and its diff in its own window. Underneath
-is [herdr](https://github.com/): workspaces, panes, agents.
+is [herdr-core](https://github.com/herdrdev/herdr-core) (`hc`): one terminal per agent, and
+[herdr-app](https://github.com/herdrdev/herdr-app) shows each job as a space of its own.
 
 ```mermaid
 flowchart LR
@@ -19,7 +20,7 @@ flowchart LR
         A["agent<br/>write → test → commit"]
     end
 
-    subgraph PAIR["new worktree · pair —— one space, two panes"]
+    subgraph PAIR["new worktree · pair —— one space, two tabs"]
         direction TB
         IM["impl<br/>the only one writing"] -- "milestone done,<br/>asks for the gate" --> RV["review<br/>read-only, holds the gate"]
         RV -- "PASS / numbered findings" --> IM
@@ -62,7 +63,8 @@ Symlinks `bin/foreman` into `~/.local/bin` and `skill/` into every agent framewo
 (`~/.claude/skills` and `~/.codex/skills` share one SKILL.md), then seeds `local/` from
 `examples/`. Idempotent.
 
-Needs `python3 >= 3.11` and `herdr`; `gh` is optional (the PR/CI column of `status` uses it).
+Needs `python3 >= 3.11` and `hc` (herdr-core) on the machine that holds the checkouts; `gh` is
+optional (the PR/CI column of `status` uses it).
 
 ## Setup
 
@@ -94,21 +96,22 @@ those **is written only in that hook script** (a non-zero exit aborts the dispat
 also the thing to run when you create a worktree by hand, which is why the steps should not be
 repeated in your project docs.
 
-Use `[hooks].source_env` for exports and shell functions that must be inherited by the agent.
-Foreman sources it in the pane after worktree setup and before `herdr agent start`, and repeats
-that initialization on `foreman restart`. It receives `FOREMAN_PROMPT`, `FOREMAN_PLAN` and a
+Use `[hooks].source_env` for exports and a `cd` that must be inherited by the agent. Each role
+runs a launch script that Foreman writes to `state/jobs/<task>/`: it sources the hook, then
+`exec`s the agent in the same shell, and `foreman restart` runs it again. It receives
+`FOREMAN_PROMPT`, `FOREMAN_PLAN` and a
 `FOREMAN_AGENT_ARGS_FILE` path in addition to the normal worktree fields. A hook may write a
 JSON array of strings to that file; Foreman appends those arguments to this agent's launch
 command. This is intended for runtime values discovered by the hook, such as a container's
 dynamic SSH endpoint. Set `source_env_timeout_ms` when setup can legitimately take longer than
-the default 60 seconds. Hook failure is reported immediately with the pane's recent output.
+the default 60 seconds. Hook failure is reported immediately with the terminal's last output.
 
 Use `[hooks].pre_done` for project-specific finish work. `foreman done` first stops the agents
-so their sessions are flushed, then runs this hook while panes, worktree and ledger still
-exist. It receives `FOREMAN_REMOVE_WORKTREE=1` for `done --rm` and a JSON description of the
+so their sessions are flushed, then runs this hook while their terminals (stopped, still
+readable), worktree and ledger still exist. It receives `FOREMAN_REMOVE_WORKTREE=1` for `done --rm` and a JSON description of the
 roles in `FOREMAN_AGENTS_JSON`. Archive transcripts, move durable artifacts and remove
-containers here. A non-zero exit stops teardown; Foreman keeps the pane, worktree and ledger
-so the finish step can be fixed and retried.
+containers here. A non-zero exit stops teardown; Foreman keeps the terminals, worktree and
+ledger so the finish step can be fixed and retried.
 
 `solo_notes`, `impl_notes` and `review_notes` in `<project>.toml` are free text and go into
 that role's opening prompt verbatim — point at the project's own rules file (**point, don't
@@ -136,11 +139,36 @@ Pi accepts `provider/model` through Foreman's existing `--model` option, so Clau
 selection stays explicit. Omit `--model` to let Pi use its own saved provider/model.
 
 Pick the mode first, then that mode's flags (`solo` never shows `--review-*`). The work itself
-is `--plan <file>` or `--prompt "one sentence"`. It reports both pane ids when it's done.
+is `--plan <file>` or `--prompt "one sentence"`. It reports each agent's name and address when
+it's done.
 
 The remaining four are self-explanatory under `foreman --help`: `say` (message an agent),
 `status` (who is paired with whom, PR and CI), `restart` (restart one role in place), `done`
 (wrap up).
+
+## Where the agents are
+
+Every agent runs in an `hc` terminal of its own, named `<task>` (solo) or `<task>-impl` /
+`<task>-rev` (pair). That name is the address to use everywhere — `foreman say`, `hc read`,
+`hc attach` (leave with Ctrl+\\) — because Foreman sets it and the agent cannot change it.
+The `t1b`-style address changes when `foreman restart` replaces the terminal.
+
+herdr-app shows a terminal only when it carries `herdr.space` / `herdr.tab` labels
+([herdr-app #290](https://github.com/herdrdev/herdr-app/issues/290)), so Foreman gives each job
+a new space id and each role a new tab id. The space is named after the worktree folder. A pair
+gets two tabs, not a split: labels cannot place a split yet
+([herdr-app #313](https://github.com/herdrdev/herdr-app/issues/313)). `foreman done` removes the
+terminals, and herdr-app drops the space with them.
+
+Terminals are started with `--no-parent`: a job outlives the session that dispatched it, and
+the dispatcher's input is not filled with a note for every turn the agents finish.
+
+`[kinds.*]` in `local/foreman.toml` says how to start each agent (`command`, `args`, the flag
+templates) and how to accept its folder-trust dialog (`trust_prompt`, `trust_keys`). Agents
+draw that dialog without reporting a status, so Foreman can only find it on screen.
+
+For an end-to-end test on config and ledgers of its own, point `FOREMAN_LOCAL` at another
+`local/` and `FOREMAN_STATE` at another `state/`.
 
 ## Prompts — changing what an agent is told
 
@@ -155,7 +183,7 @@ templates/pair-protocol.md   the gate loop — spliced into both pair roles, so 
 ```
 
 The role templates are short and say only **who you are**; the protocol holds **how the two of
-you work together**. Rendered, a prompt reads: identity (your pane and your partner's) → the
+you work together**. Rendered, a prompt reads: identity (your name and your partner's) → the
 task → `## Role` → `## Collaboration` → `## Notes`. The last one is the free text from your
 project toml — `{solo_notes}`, `{impl_notes}` or `{review_notes}`, one per template, so the
 three can be overridden apart; leave one empty and its heading disappears.
