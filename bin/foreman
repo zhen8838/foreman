@@ -5,9 +5,11 @@ Two modes:
   solo  one agent takes it all the way to a PR.
   pair  two agents in one worktree: impl writes, review gates and stays read-only.
 
-foreman does two things: start the agents, wire them to each other. Watching a screen and
-taking one over are not wrapped (`herdr agent read/attach` directly). Only messaging is, as
-`foreman say` — channel rules have to be enforced by the program, not by good intentions.
+foreman does two things: start the agents, wire them to each other. It runs on herdr-core's
+`hc`: one terminal per agent, labelled so herdr-app shows each job as a space of its own.
+Watching a screen and taking one over are not wrapped (`hc read/attach` directly). Only
+messaging is, as `foreman say` — channel rules have to be enforced by the program, not by good
+intentions.
 
 Usage: `foreman --help`. Config and templates: see the repo README.
 """
@@ -18,6 +20,7 @@ import argparse
 import json
 import os
 import re
+import secrets
 import shlex
 import shutil
 import subprocess
@@ -26,14 +29,22 @@ import time
 import tomllib
 from pathlib import Path
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 
 REPO = Path(__file__).resolve().parent.parent
-LOCAL = REPO / "local"
-JOBS = REPO / "state" / "jobs"
+# Both can be pointed elsewhere, so an end-to-end test runs on config and ledgers of its own.
+LOCAL = Path(os.environ.get("FOREMAN_LOCAL") or REPO / "local")
+JOBS = Path(os.environ.get("FOREMAN_STATE") or REPO / "state") / "jobs"
 
 ROLE_SUFFIX = {"impl": "-impl", "review": "-rev"}
 MODE_ROLES = {"solo": ["solo"], "pair": ["impl", "review"]}
+
+# How long an agent may take to report in, on top of whatever source_env is allowed.
+BOOT_TIMEOUT_S = 60
+
+# The shape of an hc terminal address: `t7`, `t1b`, or `machine/t7`. Words like "the" have it
+# too, so a match is only a candidate until hc confirms the terminal (see resolve_recipient).
+ADDRESS = re.compile(r"(?:[a-z0-9][a-z0-9_-]*/)?t[0-9a-z]{1,6}")
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -52,18 +63,59 @@ def run(argv: list[str], *, cwd: Path | None = None, check: bool = True,
     )
 
 
-def herdr(*argv: str) -> dict:
-    """Run one herdr command and return the `result` object out of its JSON."""
-    proc = run(["herdr", *argv], check=False)
+def hc(cmd: str, *argv: str, check: bool = True) -> dict:
+    """Run one hc command and return its JSON object.
+
+    hc reports a failure as `{"error": {kind, message, hint}}` on stderr, with an exit code of
+    its own (3 not_found, 9 blocked, 11 finished). check=False hands that back as
+    `{"error": {...}, "exit": code}`, for the paths that must carry on regardless — teardown.
+    """
+    try:
+        proc = run(["hc", cmd, "--json", *argv], check=False)
+    except FileNotFoundError:
+        raise Fail("hc is not on PATH — foreman runs every agent through herdr-core") from None
     if proc.returncode != 0:
-        raise Fail(f"herdr {' '.join(argv)} failed: {proc.stderr.strip() or proc.stdout.strip()}")
+        try:
+            err = json.loads(proc.stderr).get("error") or {}
+        except (json.JSONDecodeError, AttributeError):
+            err = {}
+        err.setdefault("message", (proc.stderr or proc.stdout).strip()
+                       or f"exit {proc.returncode}")
+        if check:
+            hint = f"\n        {err['hint']}" if err.get("hint") else ""
+            raise Fail(f"hc {cmd} {shlex.join(argv)[:200]} failed: {err['message']}{hint}")
+        return {"error": err, "exit": proc.returncode}
     out = proc.stdout.strip()
     if not out:
         return {}
     try:
-        return json.loads(out).get("result", {})
+        return json.loads(out)
     except json.JSONDecodeError:
         return {"_raw": out}
+
+
+def run_argv(name: str, cwd: Path, labels: dict[str, str], argv: list[str]) -> list[str]:
+    """The one `hc run` foreman issues; every agent terminal starts through here, so the flags
+    that decide a terminal's lifetime are decided once.
+
+    --no-parent  hc otherwise makes whoever ran foreman — usually a planner's terminal — the
+                 parent. The agents would die when that session ends, and every turn they
+                 finish would be typed into the planner's input as a note. A dispatched job
+                 outlives the session that dispatched it.
+    labels       herdr.space / herdr.tab are how herdr-app adopts a terminal it did not start
+                 (herdr-app #290): an id it doesn't know becomes a new space or tab, and an
+                 unlabelled terminal is never shown. foreman.task / foreman.role let a
+                 terminal find its own job.
+    """
+    out = ["run", "--bg", "--no-parent", "--name", name, "--cwd", str(cwd)]
+    for key, value in labels.items():
+        out += ["--label", f"{key}={value}"]
+    return [*out, "--", *argv]
+
+
+def new_id(prefix: str) -> str:
+    """A herdr-app space (`sp`) or tab (`tb`) id, in the shape the app makes its own."""
+    return prefix + secrets.token_hex(16)
 
 
 def git(path: Path, *argv: str) -> str:
@@ -159,61 +211,19 @@ def agent_spec(settings: dict, mode: str, role: str, args: argparse.Namespace) -
     return spec
 
 
-def submit_prompt(target: str, text: str, *, tries: int = 3, settle_s: float = 1.5) -> None:
-    """Submit a prompt, then confirm a new turn actually started.
-
-    For codex `herdr agent prompt` is fill-and-enter, done in one step. Other interactive
-    agents are not always so predictable: a paste can swallow the enter and leave the text
-    in the input box. In a pair that fails silently — review never starts, the gate is
-    entirely on review, and the result is an ungated solo while `foreman status` looks fine.
-
-    What counts as proof is a **transition**, not a state. `working` on its own can be the
-    turn the agent was already running, and herdr lumps idle, done and blocked together as
-    not-busy (that is what `agent wait` matches without --until), so `!= idle` reads a
-    just-finished `done` as success. Since `say` waits with `agent wait`, it delivers exactly
-    when the recipient enters `done` — the reading that gets misjudged is the one it will
-    almost always see. `state_change_seq` only moves when the status really changes, so a
-    fresh `working` is one whose seq differs from the one taken before the prompt. Agent
-    startup can also produce that transition, so send an explicit Enter before observing it.
-
-    An agent already working when the prompt arrives is a case nothing here can settle:
-    Claude Code queues the message and its status never changes, so delivery neither proves
-    nor disproves itself. Send the enter regardless — on an empty box it does nothing — and
-    say plainly that this was not confirmed rather than claim it landed.
-    """
-    before = herdr("agent", "get", target).get("agent", {})
-    seq = before.get("state_change_seq")
-    herdr("agent", "prompt", target, text)
-    # Safe for agents whose prompt command already submitted: Enter on an empty input is a
-    # no-op. For Pi/Claude this also closes the paste-before-enter race before startup can
-    # masquerade as proof that the turn began.
-    herdr("agent", "send-keys", target, "enter")
-    for _ in range(tries):
-        time.sleep(settle_s)
-        info = herdr("agent", "get", target).get("agent", {})
-        if info.get("agent_status") == "working" and info.get("state_change_seq") != seq:
-            return
-        if _ + 1 < tries:
-            herdr("agent", "send-keys", target, "enter")
-    if before.get("agent_status") == "working":
-        sys.stderr.write(
-            f"foreman: {target} was already working, so delivery could not be confirmed — "
-            f"the message is most likely queued.\n        Check with: herdr agent read "
-            f"{target}\n")
-    else:
-        sys.stderr.write(
-            f"foreman: {target} never started a new turn — the text may be stuck in the "
-            f"input box.\n        Go look: herdr agent attach {target}\n")
-
-
-def agent_argv(settings: dict, spec: dict) -> list[str]:
-    """Turn model/effort/tier into flags via the kinds table. Unset means absent, which
-    leaves the agent reading its own config."""
-    kind = spec["kind"]
+def kind_table(settings: dict, kind: str) -> dict:
     table = settings.get("kinds", {}).get(kind)
     if table is None:
         raise Fail(f"local/foreman.toml has no [kinds.{kind}]")
-    argv = list(table.get("args", []))
+    return table
+
+
+def agent_argv(settings: dict, spec: dict) -> list[str]:
+    """The agent's command line: its command, its fixed args, then model/effort/tier as flags
+    via the kinds table. Unset means absent, which leaves the agent reading its own config."""
+    kind = spec["kind"]
+    table = kind_table(settings, kind)
+    argv = [*table.get("command", [kind]), *table.get("args", [])]
     for field, flag_key in (("model", "model_flag"), ("effort", "effort_flag"),
                             ("tier", "tier_flag")):
         value = spec.get(field)
@@ -222,6 +232,41 @@ def agent_argv(settings: dict, spec: dict) -> list[str]:
         for tok in table.get(flag_key, []):
             argv.append(tok.replace("{" + field + "}", str(value)))
     return argv
+
+
+def submit_prompt(target: str, text: str) -> None:
+    """Deliver one message, then say plainly whether it landed.
+
+    `hc send` pastes the text, presses Enter, and reports `started`: whether the program went
+    `working` within a few seconds of it. That is the transition check herdr made us build by
+    hand, so all that is left here is reading the answer. A paste keeps its newlines inside one
+    message; nothing submits half of it.
+
+    An agent already working when the message arrives queues it, and its status never changes,
+    so delivery neither proves nor disproves itself — say so rather than claim it landed. A
+    blocked agent (a permission or a question on its screen) is refused by hc, and is not
+    forced: a typed message could answer a dialog nobody has read.
+    """
+    res = hc("send", "--", target, text, check=False)
+    if "error" in res:
+        if res["exit"] == 9:
+            raise Fail(f"{target} is blocked — a person is needed there (a permission or a "
+                       f"question). Nothing was sent.\n        Go look: hc attach {target}")
+        raise Fail(f"could not send to {target}: {res['error']['message']}")
+    if res.get("started"):
+        return
+    if res.get("status") == "working":
+        sys.stderr.write(
+            f"foreman: {target} was already working, so delivery could not be confirmed — "
+            f"the message is most likely queued.\n        Check with: hc read {target}\n")
+    elif res.get("started") is None:
+        sys.stderr.write(
+            f"foreman: {target} reports no status, so delivery could not be confirmed.\n"
+            f"        Check with: hc read {target}\n")
+    else:
+        sys.stderr.write(
+            f"foreman: {target} never started a new turn — the text may be stuck in the "
+            f"input box.\n        Go look: hc attach {target}\n")
 
 
 # ── templates ─────────────────────────────────────────────────────────────────
@@ -262,8 +307,8 @@ def render(path: Path, fields: dict[str, str], protocol: str = "") -> str:
     """Fill a template. `{protocol}` goes in verbatim first, then every field.
 
     The order matters: impl and review share one protocol fragment, and that fragment carries
-    placeholders of its own such as `{peer_pane}`. Splicing it in first is what lets those
-    get filled too.
+    placeholders of its own such as `{peer}`. Splicing it in first is what lets those get
+    filled too.
     """
     text = path.read_text()
     if protocol:
@@ -285,6 +330,11 @@ def render(path: Path, fields: dict[str, str], protocol: str = "") -> str:
 
 def job_path(task: str) -> Path:
     return JOBS / f"{task}.json"
+
+
+def job_dir(task: str) -> Path:
+    """Beside the ledger: each role's launch script and the prompts it was started with."""
+    return JOBS / task
 
 
 def read_job(task: str) -> dict:
@@ -310,27 +360,21 @@ def split_handle(ref: str) -> tuple[str, str | None]:
 
 
 def whoami() -> tuple[dict, str] | None:
-    """Who am I: ask herdr which pane this is, then look it up in the ledger. None when
-    there is no match — a human's own pane, for instance.
+    """Who am I: the terminal hc says this is, and the job its labels name. None when there is
+    no match — a human's own terminal, for instance.
 
-    **Deliberately not $HERDR_PANE_ID**: that is a snapshot inherited when the shell started,
-    and it goes stale once a workspace is closed and reopened. At best it names a pane that
-    no longer exists; at worst it collides with a recycled pane id in a new workspace and the
-    message lands on someone else's job. `herdr pane current` validates and errors on a stale
-    pane, which is exactly what we want.
+    `$HC_TERMINAL_ID` is safe to trust: an address belongs to one terminal forever on its core,
+    and is never handed to another. The labels were set by `foreman assign` at `hc run`.
     """
-    try:
-        pane = herdr("pane", "current").get("pane", {}).get("pane_id")
-    except Fail:
+    me = os.environ.get("HC_TERMINAL_ID")
+    if not me:
         return None
-    if not pane:
+    labels = hc("get", me, check=False).get("labels") or {}
+    task, role = labels.get("foreman.task"), labels.get("foreman.role")
+    if not task or not job_path(task).exists():
         return None
-    for path in JOBS.glob("*.json"):
-        job = json.loads(path.read_text())
-        for role, info in job["agents"].items():
-            if info["pane"] == pane:
-                return job, role
-    return None
+    job = read_job(task)
+    return (job, role) if role in job["agents"] else None
 
 
 def pick_role(job: dict, role: str | None) -> str:
@@ -342,36 +386,17 @@ def pick_role(job: dict, role: str | None) -> str:
     return role
 
 
-# ── assign ────────────────────────────────────────────────────────────────────
+def agent_env(job: dict, role: str) -> dict[str, str]:
+    """What the source_env hook, and through it the agent, is told about the job."""
+    return {
+        "FOREMAN_WORKTREE": job["path"], "FOREMAN_MAIN": job["main"],
+        "FOREMAN_TASK": job["task"], "FOREMAN_BRANCH": job["branch"],
+        "FOREMAN_MODE": job["mode"], "FOREMAN_ROLE": role,
+        "FOREMAN_PROMPT": job.get("brief", ""), "FOREMAN_PLAN": job.get("plan", ""),
+    }
 
 
-def derive_task(args: argparse.Namespace) -> str:
-    if args.task:
-        return args.task
-    if args.plan:
-        stem = Path(args.plan).stem
-        return re.sub(r"^\d+[-_]", "", stem)  # drop the plan's ordering prefix
-    raise Fail("--prompt needs --task: there is no plan filename to derive it from")
-
-
-def start_agent(handle: str, pane: str, spec: dict, settings: dict, plan: Plan,
-                runtime_args: list[str] | None = None) -> None:
-    argv = ["agent", "start", handle, "--kind", spec["kind"], "--pane", pane,
-            "--timeout", "60000"]
-    extra = [*agent_argv(settings, spec), *(runtime_args or [])]
-    if extra:
-        argv += ["--", *extra]
-    plan.step(f"start {handle} ({spec['kind']}"
-              f"{'/' + spec['effort'] if spec.get('effort') else ''})", ["herdr", *argv])
-    if plan.dry:
-        return
-    herdr(*argv)
-    # codex may ask to trust a directory the first time; answer only if it actually asked
-    hit = run(["herdr", "pane", "wait-output", pane, "--match", "Do you trust",
-               "--timeout", "5000"], check=False)
-    if hit.returncode == 0:
-        herdr("agent", "send-keys", handle, "enter")
-        time.sleep(1)
+# ── agents ────────────────────────────────────────────────────────────────────
 
 
 class Plan:
@@ -387,93 +412,175 @@ class Plan:
             print(f"     {shlex.join(argv)}")
 
 
-def source_agent_env(project: dict, pane: str, values: dict[str, str],
-                     plan: Plan) -> list[str]:
-    """Source a project environment and collect optional per-agent CLI arguments.
+def boxed(title: str, text: str) -> None:
+    print(f"     ┌─ {title} " + "─" * max(0, 64 - len(title)))
+    for line in text.splitlines():
+        print("     │ " + line)
+    print("     └" + "─" * 67)
 
-    A source hook can write a JSON string array to ``$FOREMAN_AGENT_ARGS_FILE``. This is
-    useful for values that only exist after worktree setup, such as a container's dynamic
-    SSH endpoint. The hook still runs in the pane so its exports and ``cd`` survive.
+
+# Turns the JSON array a source_env hook may leave behind into bash words, or refuses it.
+_ARGS_TO_BASH = (
+    "import json, shlex, sys\n"
+    "args = json.load(open(sys.argv[1]))\n"
+    "if not isinstance(args, list) or not all(isinstance(a, str) for a in args):\n"
+    "    sys.exit('foreman: source_env agent arguments must be a JSON array of strings')\n"
+    "print(shlex.join(args))\n"
+)
+
+
+def launch_script(argv: list[str], env: dict[str, str], hook: Path | None,
+                  args_file: Path) -> str:
+    """The script a role's terminal runs: export the job, source the project's hook, exec the
+    agent with the prompt file named in `$1` as its last argument.
+
+    One shell from start to finish, so whatever the hook exports or `cd`s into is what the
+    agent inherits — the way a herdr pane's shell used to carry it. A failing hook ends the
+    script with its own exit code, which is how foreman learns about it.
+
+    A hook may also write a JSON array of strings to `$FOREMAN_AGENT_ARGS_FILE`: arguments
+    that only exist after setup, such as a container's dynamic SSH endpoint. They go after the
+    configured flags and before the prompt.
     """
-    hook = project.get("hooks", {}).get("source_env")
-    if not hook:
-        # Returning quietly makes a missing key indistinguishable from a key that did
-        # its job: the dry run lists what the project configured and never the gap.
+    lines = ["#!/usr/bin/env bash",
+             "# Written by foreman; `foreman restart` runs it again.",
+             # a sourced file sees the caller's arguments; the hook gets none, as in a shell
+             'prompt_file=$1; shift',
+             *(f"export {key}={shlex.quote(str(value))}" for key, value in env.items()),
+             "runtime_args=()"]
+    if hook:
+        lines += [
+            f"export FOREMAN_AGENT_ARGS_FILE={shlex.quote(str(args_file))}",
+            'rm -f -- "$FOREMAN_AGENT_ARGS_FILE"',
+            f"source {shlex.quote(str(hook))} || {{ rc=$?; "
+            f"echo \"foreman: source_env {hook.name} failed (exit $rc)\" >&2; exit $rc; }}",
+            'if [ -e "$FOREMAN_AGENT_ARGS_FILE" ]; then',
+            f"    words=$(python3 -I -c {shlex.quote(_ARGS_TO_BASH)} "
+            '"$FOREMAN_AGENT_ARGS_FILE") || exit 98',
+            '    eval "runtime_args=($words)"',
+            '    rm -f -- "$FOREMAN_AGENT_ARGS_FILE"',
+            "fi",
+        ]
+    lines.append(f'exec {shlex.join(argv)} "${{runtime_args[@]}}" "$(cat -- "$prompt_file")"')
+    return "\n".join(lines) + "\n"
+
+
+def wait_ready(addr: str, handle: str, table: dict, timeout_s: float) -> None:
+    """Wait for the agent's first status report: from then on it is up and has its prompt.
+
+    That first report is the startup `idle` (herdr-core #94); the opening prompt is already on
+    the command line, so nothing is left to deliver. Two things come before it that hc has no
+    event for: the source_env hook still running, and a folder trust dialog — agents draw it
+    without reporting `blocked`, so it can only be seen on screen. Hence a poll, and not
+    `hc wait`, which would sit through the whole first turn.
+    """
+    prompts = table.get("trust_prompt") or []
+    prompts = [prompts] if isinstance(prompts, str) else list(prompts)
+    keys = table.get("trust_keys") or ["enter"]
+    deadline = time.monotonic() + timeout_s
+    answered = False
+
+    def last_output() -> str:
+        text = hc("read", "--lines", "40", "--", addr, check=False).get("text", "").strip()
+        return f"\n\nLast output:\n{text}" if text else ""
+
+    while True:
+        term = hc("get", "--", addr)
+        if term.get("state") != "live":
+            tail = last_output()
+            hc("rm", "--", addr, check=False)
+            raise Fail(f"{handle} ({addr}) exited {term.get('exit_code')} before the agent "
+                       f"reported in — source_env or the agent's own startup failed{tail}")
+        if term.get("reported"):
+            return
+        if prompts and not answered:
+            screen = hc("read", "--", addr, check=False).get("text", "")
+            if any(p in screen for p in prompts):
+                # the folder is a worktree foreman just made from the project's own checkout
+                hc("keys", "--", addr, *keys)
+                answered = True
+        if time.monotonic() >= deadline:
+            raise Fail(f"{handle} ({addr}) did not report in within {timeout_s:g}s; it is "
+                       f"still running.\n        Go look: hc attach {handle}{last_output()}")
+        time.sleep(1)
+
+
+def launch_agent(role: str, info: dict, *, job: dict, settings: dict, project: dict,
+                 prompt: str, prompt_name: str, plan: Plan) -> str:
+    """Start one agent in a terminal of its own and return the terminal's address.
+
+    The prompt rides on the agent's command line, so there is never a booting agent to type
+    into; see `launch_script` for the rest.
+    """
+    hook = None
+    timeout_s = BOOT_TIMEOUT_S
+    if rel := project.get("hooks", {}).get("source_env"):
+        hook = resolve(rel)
+        if not hook.exists():
+            raise Fail(f"hooks.source_env points at {hook}, which does not exist")
+        timeout_ms = project.get("hooks", {}).get("source_env_timeout_ms", 60000)
+        if isinstance(timeout_ms, bool) or not isinstance(timeout_ms, int) or timeout_ms <= 0:
+            raise Fail("hooks.source_env_timeout_ms must be a positive integer")
+        timeout_s += timeout_ms / 1000
+    else:
+        # Saying nothing makes a missing key indistinguishable from a key that did its job:
+        # the dry run lists what the project configured and never the gap.
         plan.step("skip agent environment (no hooks.source_env — the agent gets a bare shell)")
-        return []
-    hook_path = resolve(hook)
-    if not hook_path.exists():
-        raise Fail(f"hooks.source_env points at {hook_path}, which does not exist")
 
-    marker = f"__FOREMAN_ENV_{os.getpid()}_{time.time_ns()}__"
-    args_file = JOBS / f".agent-args-{os.getpid()}-{time.time_ns()}.json"
-    values = {**values, "FOREMAN_AGENT_ARGS_FILE": str(args_file)}
-    # Keep the full marker out of the echoed command so wait-output cannot match too early.
-    split = len(marker) // 2
-    marker_expr = f"'{marker[:split]}'" + f"'{marker[split:]}'"
-    exports = "; ".join(
-        f"export {name}={shlex.quote(str(value))}" for name, value in values.items()
-    )
-    command = (
-        f"{exports}; "
-        f"if source {shlex.quote(str(hook_path))}; then _foreman_status=OK; "
-        f"else _foreman_rc=$?; _foreman_status=FAIL; fi; "
-        f"printf '%s %s %s\\n' {marker_expr} \"$_foreman_status\" "
-        f"\"${{_foreman_rc:-0}}\""
-    )
-    argv = ["herdr", "pane", "run", pane, command]
-    plan.step(f"source agent environment ({hook_path.name})", argv)
+    workdir = job_dir(job["task"])
+    script = workdir / f"{role}.launch.sh"
+    prompt_file = workdir / f"{role}.{prompt_name}.md"
+    text = launch_script(agent_argv(settings, info), agent_env(job, role), hook,
+                         workdir / f"{role}.args.json")
+    labels = {"herdr.space": job["space"], "herdr.tab": info["tab"],
+              "foreman.task": job["task"], "foreman.role": role}
+    argv = run_argv(info["handle"], Path(job["path"]), labels,
+                    ["bash", str(script), str(prompt_file)])
+
+    plan.step(f"write {script}" + (f", sourcing {hook.name}" if hook else ""))
     if plan.dry:
-        return []
+        boxed(script.name, text)
+    plan.step(f"start {info['handle']} ({info['kind']}"
+              f"{'/' + info['effort'] if info.get('effort') else ''})", ["hc", *argv])
+    if plan.dry:
+        return "<address>"
 
-    timeout_value = project.get("hooks", {}).get("source_env_timeout_ms", 60000)
-    if isinstance(timeout_value, bool) or not isinstance(timeout_value, int) or timeout_value <= 0:
-        raise Fail("hooks.source_env_timeout_ms must be a positive integer")
-    timeout_ms = str(timeout_value)
-    JOBS.mkdir(parents=True, exist_ok=True)
-    herdr("pane", "run", pane, command)
-    ready = run(["herdr", "pane", "wait-output", pane, "--source", "recent-unwrapped",
-                 "--match", marker, "--timeout", timeout_ms], check=False)
-    snapshot = run(["herdr", "pane", "read", pane, "--source", "recent-unwrapped",
-                    "--lines", "30", "--format", "text"], check=False)
-    matched_line = ""
-    try:
-        result = json.loads(ready.stdout or "{}").get("result", {})
-        matched_line = str(result.get("matched_line", ""))
-    except (AttributeError, json.JSONDecodeError):
-        pass
-    output = "\n".join(part for part in (matched_line, snapshot.stdout.strip()) if part)
-    if ready.returncode != 0:
-        detail = ready.stderr.strip() or ready.stdout.strip()
-        tail = f"\n\nLast pane output:\n{output}" if output else ""
-        args_file.unlink(missing_ok=True)
-        raise Fail(f"source_env timed out after {int(timeout_ms) / 1000:g}s in pane "
-                   f"{pane}: {detail}{tail}")
+    workdir.mkdir(parents=True, exist_ok=True)
+    prompt_file.write_text(prompt + "\n")
+    script.write_text(text)
+    addr = hc(*argv)["address"]
+    wait_ready(addr, info["handle"], kind_table(settings, info["kind"]), timeout_s)
+    return addr
 
-    match = re.search(rf"{re.escape(marker)} (OK|FAIL) ([0-9]+)", output)
-    if not match:
-        args_file.unlink(missing_ok=True)
-        raise Fail(f"source_env returned an unreadable status in pane {pane}.\n\n"
-                   f"Last pane output:\n{output}")
-    if match.group(1) == "FAIL":
-        args_file.unlink(missing_ok=True)
-        lines = [line for line in output.splitlines() if marker not in line]
-        detail = "\n".join(lines[-12:]).strip()
-        suffix = f"\n\nLast pane output:\n{detail}" if detail else ""
-        raise Fail(f"source_env hook {hook_path.name} failed with exit "
-                   f"{match.group(2)} in pane {pane}{suffix}")
 
-    if not args_file.exists():
-        return []
-    try:
-        runtime_args = json.loads(args_file.read_text())
-    except (OSError, json.JSONDecodeError) as exc:
-        raise Fail(f"source_env wrote invalid agent arguments to {args_file}: {exc}") from exc
-    finally:
-        args_file.unlink(missing_ok=True)
-    if not isinstance(runtime_args, list) or not all(isinstance(arg, str) for arg in runtime_args):
-        raise Fail("source_env agent arguments must be a JSON array of strings")
-    return runtime_args
+def stop_terminal(addr: str) -> bool:
+    """Stop an agent the way a person would, then make sure. Returns whether it was running.
+
+    esc ends the turn and ctrl+c twice quits Claude and Codex, which lets them write their
+    session out — a pre_done hook may archive it. kill (hangup, then escalate) is the fallback.
+    """
+    if hc("get", "--", addr, check=False).get("state") != "live":
+        return False
+    hc("interrupt", "--timeout", "3", "--", addr, check=False)
+    hc("keys", "--", addr, "ctrl+c", "ctrl+c", check=False)
+    for _ in range(10):
+        time.sleep(0.5)
+        if hc("get", "--", addr, check=False).get("state") != "live":
+            return True
+    hc("kill", "--", addr, check=False)
+    return True
+
+
+# ── assign ────────────────────────────────────────────────────────────────────
+
+
+def derive_task(args: argparse.Namespace) -> str:
+    if args.task:
+        return args.task
+    if args.plan:
+        stem = Path(args.plan).stem
+        return re.sub(r"^\d+[-_]", "", stem)  # drop the plan's ordering prefix
+    raise Fail("--prompt needs --task: there is no plan filename to derive it from")
 
 
 def cmd_assign(args: argparse.Namespace) -> None:
@@ -482,13 +589,13 @@ def cmd_assign(args: argparse.Namespace) -> None:
     mode = args.mode          # from the subcommand, so argparse already vouches for it
 
     task = derive_task(args)
-    # herdr rejects an agent name over 32 characters, and it does so at `agent start` —
-    # by which point the worktree exists, its venv is installed and the panes are split.
-    # The task name is what every handle is built from, so check it before any of that.
+    # hc rejects a terminal name over 32 characters, and it does so at `hc run` — by which
+    # point the worktree exists and its venv is installed. The task name is what every handle
+    # is built from, so check it before any of that.
     for role in MODE_ROLES[mode]:
         handle = task + ROLE_SUFFIX.get(role, "")
         if not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", handle):
-            raise Fail(f"handle {handle!r} ({len(handle)} chars) is not a name herdr accepts: "
+            raise Fail(f"handle {handle!r} ({len(handle)} chars) is not a name hc accepts: "
                        f"lowercase, digits, '-' or '_', 32 max.\n"
                        f"        Pass a shorter --task (up to "
                        f"{32 - max(len(s) for s in (ROLE_SUFFIX.get(r, '') for r in MODE_ROLES[mode]))}"
@@ -509,23 +616,19 @@ def cmd_assign(args: argparse.Namespace) -> None:
     p = Plan(args.dry_run)
     print(f"task={task}  mode={mode}  branch={branch}  base={base}\nworktree={wt}")
 
-    # 1. worktree
+    # 1. worktree — hc has none of its own, so it is git's job
     if wt.exists():
         print(f"worktree already there, reusing: {wt}")
-        p.step("open existing worktree", ["herdr", "worktree", "open", "--cwd", str(main),
-                                     "--path", str(wt), "--label", task, "--json"])
-        res = {} if p.dry else herdr("worktree", "open", "--cwd", str(main),
-                                     "--path", str(wt), "--label", task, "--json")
     else:
-        p.step("create worktree", ["herdr", "worktree", "create", "--cwd", str(main),
-                               "--branch", branch, "--base", base, "--path", str(wt),
-                               "--label", task, "--no-focus", "--json"])
-        res = {} if p.dry else herdr("worktree", "create", "--cwd", str(main),
-                                     "--branch", branch, "--base", base, "--path", str(wt),
-                                     "--label", task, "--no-focus", "--json")
-    ws = res.get("workspace", {}).get("workspace_id", "<ws>")
-    root_pane = res.get("root_pane", {}).get("pane_id") or \
-        (res.get("panes") or [{}])[0].get("pane_id", "<pane>")
+        has_branch = run(["git", "-C", str(main), "rev-parse", "--verify", "--quiet",
+                          f"refs/heads/{branch}"], check=False).returncode == 0
+        add = ["git", "-C", str(main), "worktree", "add",
+               *([str(wt), branch] if has_branch else ["-b", branch, str(wt), base])]
+        p.step(f"create worktree on {'existing' if has_branch else 'new'} branch {branch}", add)
+        if not p.dry:
+            proc = run(add, check=False)
+            if proc.returncode != 0:
+                raise Fail(f"git worktree add failed: {proc.stderr.strip() or proc.stdout.strip()}")
 
     # 2. post_worktree hook — venv, symlinks, whatever the project needs
     hook = project.get("hooks", {}).get("post_worktree")
@@ -543,33 +646,24 @@ def cmd_assign(args: argparse.Namespace) -> None:
             if proc.returncode != 0:
                 raise Fail(f"post_worktree hook exited {proc.returncode} — nothing was dispatched")
 
-    # 3. panes — a pair needs a second
-    panes = {MODE_ROLES[mode][0]: root_pane}
-    if mode == "pair":
-        p.step("split a pane for review", ["herdr", "pane", "split", "--pane", root_pane,
-                                          "--direction", "right", "--ratio", "0.5",
-                                          "--cwd", str(wt), "--no-focus"])
-        if p.dry:
-            panes["review"] = "<pane2>"
-        else:
-            herdr("pane", "split", "--pane", root_pane, "--direction", "right",
-                  "--ratio", "0.5", "--cwd", str(wt), "--no-focus")
-            # split has no --json, so find the non-root pane in the workspace listing
-            listed = [q["pane_id"] for q in herdr("pane", "list", "--workspace", ws)
-                      .get("panes", []) if q["pane_id"] != root_pane]
-            if not listed:
-                raise Fail(f"split done but no new pane showed up in workspace {ws}")
-            panes["review"] = listed[-1]
-
-    # 4. agents, and their opening prompt
+    # 3. the ledger: one herdr-app space for the job, one tab per role. Written before any
+    #    agent starts, so a dispatch that fails halfway still leaves `foreman done` a record
+    #    of what to stop.
     agents = {}
     for role in MODE_ROLES[mode]:
-        handle = task + ROLE_SUFFIX.get(role, "")
-        agents[role] = {"handle": handle, "pane": panes[role],
-                        **agent_spec(settings, mode, role, args)}
+        agents[role] = {"handle": task + ROLE_SUFFIX.get(role, ""), "address": None,
+                        "tab": new_id("tb"), **agent_spec(settings, mode, role, args)}
+    job = {"task": task, "project": project["name"], "mode": mode, "branch": branch,
+           "base": base, "path": str(wt), "main": str(main),
+           "plan": plan_abs, "brief": args.prompt or "",
+           "space": new_id("sp"), "agents": agents,
+           "created": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
+    if not p.dry:
+        write_job(job)
+
+    # 4. agents, each with its opening prompt on its command line
     for role, info in agents.items():
-        peer_info = next((a for r, a in agents.items() if r != role), {})
-        peer = peer_info.get("handle", "")
+        peer = next((a for r, a in agents.items() if r != role), {}).get("handle", "")
         tpl = template_path(project, role, mode)
         # both halves of a pair share one protocol, so it can't drift between templates
         shared = find_template(project, "pair-protocol").read_text() if mode == "pair" else ""
@@ -577,42 +671,36 @@ def cmd_assign(args: argparse.Namespace) -> None:
             "task": task, "role": role, "self": info["handle"], "peer": peer,
             "worktree": str(wt), "branch": branch, "base": base, "main": str(main),
             "plan": plan_field, "brief": args.prompt or "", "mode": mode,
-            "self_pane": info["pane"], "peer_pane": peer_info.get("pane", ""),
             # one key per role, so a project can say something different to each of the three
             **{f"{r}_notes": project.get(f"{r}_notes", "") for r in ("solo", "impl", "review")},
         }, protocol=shared)
-        runtime_args = source_agent_env(project, info["pane"], {
-            "FOREMAN_WORKTREE": str(wt), "FOREMAN_MAIN": str(main),
-            "FOREMAN_TASK": task, "FOREMAN_BRANCH": branch,
-            "FOREMAN_MODE": mode, "FOREMAN_ROLE": role,
-            "FOREMAN_PROMPT": args.prompt or "", "FOREMAN_PLAN": plan_abs,
-        }, p)
-        start_agent(info["handle"], info["pane"], info, settings, p, runtime_args)
-        p.step(f"prompt {info['handle']} (template {tpl})")
+        p.step(f"prompt {info['handle']} (template {tpl}), on its command line")
         if p.dry:
-            print("     ┌─ prompt " + "─" * 58)
-            for line in text.splitlines():
-                print("     │ " + line)
-            print("     └" + "─" * 67)
-        else:
-            submit_prompt(info["handle"], text)
+            boxed("prompt", text)
+        try:
+            info["address"] = launch_agent(role, info, job=job, settings=settings,
+                                           project=project, prompt=text,
+                                           prompt_name="prompt", plan=p)
+        except Fail as exc:
+            if p.dry:
+                raise
+            raise Fail(f"{str(exc.code).removeprefix('foreman: ')}\n        The ledger is "
+                       f"written: `foreman done {task}` stops whatever did start.") from None
+        if not p.dry:
+            write_job(job)
 
     if p.dry:
         print("\n(--dry-run: nothing was executed)")
         return
 
-    write_job({"task": task, "project": project["name"], "mode": mode, "branch": branch,
-               "base": base, "path": str(wt), "main": str(main),
-               "plan": plan_abs, "brief": args.prompt or "",
-               "workspace": ws, "agents": agents,
-               "created": time.strftime("%Y-%m-%dT%H:%M:%S%z")})
     print()
     for role, info in agents.items():
-        print(f"{info['pane']:9} {role:7} {info['handle']}")
-    first = next(iter(agents.values()))["pane"]
-    print(f"\nmessage  foreman say {first} \"...\"        # always address by pane id "
-          f"(space:pane); names cross wires\nwatch    herdr agent read {first}\n"
-          f"take over  herdr agent attach {first}   # leave with C-c twice")
+        print(f"{info['address']:6} {role:7} {info['handle']}")
+    first = next(iter(agents.values()))["handle"]
+    print(f"\nherdr-app  a space of its own, one tab per agent\n"
+          f"message    foreman say {first} \"...\"\n"
+          f"watch      hc read {first}\n"
+          f"take over  hc attach {first}   # leave with Ctrl+\\")
 
 
 # ── status ────────────────────────────────────────────────────────────────────
@@ -653,14 +741,9 @@ def cmd_status(args: argparse.Namespace) -> None:
         print("no live jobs")
         return
 
-    # Keyed by pane, not by name. `assign` binds the name with `herdr agent start`, and a
-    # session restarted by hand in that pane never binds it again: the pane keeps working
-    # and the name is simply gone. Looking an agent up by name reports a live agent as
-    # "not running", which is the one reading that makes a dropped handoff invisible.
-    live = {}
-    for a in herdr("agent", "list").get("agents", []):
-        if a.get("pane_id"):
-            live[a["pane_id"]] = a
+    # One listing, matched by address: an address is one terminal forever on this core,
+    # where a name passes to the next terminal once a restart frees it.
+    terms = {t["address"]: t for t in hc("ls", "--all").get("terminals", [])}
 
     for job in jobs:
         path = Path(job["path"])
@@ -672,17 +755,25 @@ def cmd_status(args: argparse.Namespace) -> None:
         print(f"  {head}")
         statuses = []
         for role, info in job["agents"].items():
-            handle = info["handle"]
-            agent = live.get(info["pane"])
-            state = agent["agent_status"] if agent else "not running"
+            addr = info.get("address") or "—"
+            term = terms.get(addr)
+            if not term:
+                state = "gone"
+            elif term.get("state") != "live":
+                state = "exited"
+            else:
+                state = term.get("status") or "starting"
             statuses.append(state)
             spec = info["kind"] + (f"/{info['effort']}" if info.get("effort") else "")
-            # Whoever restarted the pane may have started a different agent than the one
-            # dispatched. Say so: `restart` relaunches from the ledger and would replace it.
-            running = agent.get("agent") if agent else None
-            note = f"  ⚠ pane runs {running}" if running and running != info["kind"] else ""
+            # The program in the terminal may not be the one dispatched: an agent that crashed
+            # leaves the shell herdr-app's keep puts in its place. Say so: `restart` would
+            # replace whatever runs there.
+            running = term.get("agent") if term and state not in ("exited", "starting") else None
+            note = f"  ⚠ terminal runs {running}" if running and \
+                not running.startswith(info["kind"]) else ""
+            where = f"  [{term['where']}]" if term and term.get("where") else ""
             pair = " ⇄" if job["mode"] == "pair" else "  "
-            print(f"  {info['pane']:9}{pair} {role:7} {state:9} {spec:16} {handle}{note}")
+            print(f"  {addr:6}{pair} {role:7} {state:9} {spec:16} {info['handle']}{where}{note}")
         if job["mode"] == "pair" and set(statuses) <= {"idle", "done"} and pr == "—":
             print("  ⚠ both idle and no PR — a handoff may have been dropped; take a look")
 
@@ -690,80 +781,77 @@ def cmd_status(args: argparse.Namespace) -> None:
 # ── say ───────────────────────────────────────────────────────────────────────
 
 
+def resolve_recipient(words: list[str], me: tuple[dict, str] | None) -> tuple[str, str, list[str]]:
+    """Split `[<to>] <text>` into (target, label, text words).
+
+    The first word is a recipient only if it is unmistakably one — the address of a terminal hc
+    knows, or a job in the ledger — and something follows it. Otherwise the whole line is the
+    message, and it goes to the partner of whoever is speaking.
+    """
+    if len(words) > 1:
+        head = words[0]
+        # hc get also answers to names; an address must come back as itself
+        if ADDRESS.fullmatch(head) and \
+                hc("get", "--", head, check=False).get("address") == head:
+            label = head
+            for path in JOBS.glob("*.json"):
+                job = json.loads(path.read_text())
+                for role, info in job["agents"].items():
+                    if info.get("address") == head:
+                        label = f"{head} = {job['task']}.{role}"
+            return head, label, words[1:]
+        task, role = split_handle(head)
+        if job_path(task).exists():
+            job = read_job(task)
+            to = pick_role(job, role)
+            handle = job["agents"][to]["handle"]
+            return handle, f"{handle} = {task}.{to}", words[1:]
+
+    if not me:
+        raise Fail('no recipient given, and this terminal belongs to no job.\n'
+                   '        Address an agent by name, from `foreman status`:\n'
+                   '            foreman say <task>.impl "..."     (or <task>.rev, <task>)\n'
+                   '        or by its hc address, such as t1b.')
+    job, my_role = me
+    peers = [r for r in job["agents"] if r != my_role]
+    if not peers:
+        raise Fail(f"job {job['task']} is solo — no partner; name a recipient explicitly")
+    handle = job["agents"][peers[0]]["handle"]
+    return handle, f"{handle} = {job['task']}.{peers[0]}", words
+
+
 def cmd_say(args: argparse.Namespace) -> None:
-    """The channel between two agents. The rules are enforced here, not left to the prompt."""
+    """The channel between two agents. The rules are enforced here, not left to the prompt.
+
+    hc names the speaker itself — a message arrives as `<hc from="t1b x-impl">…</hc>` — so no
+    prefix is added; a message from a terminal outside every job is a human talking.
+    """
     settings = load_settings()
     limit = int(settings.get("channel", {}).get("max_chars", 4000))
     wait_ms = int(settings.get("channel", {}).get("wait_idle_ms", 60000))
 
-    me = whoami()
-    words = list(args.words)
-    pane = label = None
-    if len(words) > 1:
-        head = words[0]
-        if re.fullmatch(r"w[A-Za-z0-9]+:p\d+", head):
-            # the formal form, space:pane — the only one that survives several live pairs
-            pane = label = head
-            for path in JOBS.glob("*.json"):
-                job = json.loads(path.read_text())
-                for role, info in job["agents"].items():
-                    if info["pane"] == head:
-                        label = f"{head} = {job['task']}.{role}"
-        elif split_handle(head)[0] in {p.stem for p in JOBS.glob("*.json")}:
-            # the convenience form, <task>.impl — an exact ledger lookup, still ending in a pane id
-            task, role = split_handle(head)
-            job = read_job(task)
-            to = pick_role(job, role)
-            pane = job["agents"][to]["pane"]
-            label = f"{pane} = {task}.{to}"
-        if pane:
-            words.pop(0)
-
-    if not pane:
-        if not me:
-            raise Fail('no recipient given, and this pane belongs to no job.\n'
-                       '        The formal address is a pane id (space:pane), from '
-                       '`herdr agent list` or `foreman status`:\n'
-                       '            foreman say <space>:<pane> "..."\n'
-                       '        Jobs foreman dispatched also answer to <task>.impl / <task>.rev.\n'
-                       '        Window titles are refused: agent frameworks rewrite them, and '
-                       'they cross wires between pairs.')
-        job, my_role = me
-        peers = [r for r in job["agents"] if r != my_role]
-        if not peers:
-            raise Fail(f"job {job['task']} is solo — no partner; give a pane id explicitly")
-        pane = job["agents"][peers[0]]["pane"]
-        label = f"{pane} = {job['task']}.{peers[0]}"
-
-    # the prefix names the speaker; no prefix means a human is talking
-    prefix = f"[{me[0]['task']}.{me[1]}] " if me else ""
-
-    # 1. collapse to one line: in a TUI a newline is enter, which submits half a message
-    text = re.sub(r"\s+", " ", " ".join(words)).strip()
+    target, label, words = resolve_recipient(list(args.words), whoami())
+    text = " ".join(words).strip()
     if not text:
         raise Fail("empty message, not sending")
 
-    # 2. one mechanical ceiling: on a single line, a long body is truncated by the input box
-    #    or swallowed into a `[Pasted text #N]` chip (see submit_prompt). Not a style rule —
-    #    review is read-only and cannot "write a file and point at it", so a stricter cap
-    #    would corner a legitimate findings list.
+    # One mechanical ceiling: a body that long is better given as a path or a diff range the
+    # recipient can look at (you share one tree). Not a style rule — review is read-only and
+    # cannot "write a file and point at it", so a stricter cap would corner a findings list.
     if limit and len(text) > limit:
         raise Fail(
-            f"message is {len(text)} chars, over the {limit} limit — one line that long "
-            f"won't fit a TUI input box.\n"
+            f"message is {len(text)} chars, over the {limit} limit.\n"
             f"        Send it as two, or give a diff range, a path, a command and let them "
             f"look themselves\n        (you share one tree). To lift it: "
             f"[channel] max_chars in local/foreman.toml, 0 for no limit.")
 
-    body = text if text.startswith("[") else prefix + text
-
-    # 3. wait for them to be free — mid-turn messages get eaten — but send anyway on timeout:
-    #    a hanging command gets backgrounded by codex, losing the receipt. No --until, because
-    #    the default covers done as well, and codex reports done rather than idle after a turn
+    # Wait for them to be free — a message into a running turn can get swallowed — but send
+    # anyway on timeout: a command that hangs gets backgrounded by codex, losing the receipt.
+    # A message to the speaker also ends the wait; it is read after this one goes out.
     if not args.now:
-        run(["herdr", "agent", "wait", pane, "--timeout", str(wait_ms)], check=False)
-    submit_prompt(pane, body)
-    print(f"→ {label}: {body}")
+        hc("wait", "--timeout", str(max(1, wait_ms // 1000)), "--", target, check=False)
+    submit_prompt(target, text)
+    print(f"→ {label}: {text}")
 
 
 # ── restart / done ────────────────────────────────────────────────────────────
@@ -777,28 +865,25 @@ def cmd_restart(args: argparse.Namespace) -> None:
     settings = load_settings()
     project = load_project(job.get("project"), settings)
 
-    # Address the pane, not the handle: a hand-restarted session has no name left, and
-    # raising here would abort before `start_agent` -- which is the very step that binds
-    # the name back on.
-    herdr("agent", "send-keys", info["pane"], "esc")            # stop the current turn
-    time.sleep(1)
-    herdr("agent", "send-keys", info["pane"], "C-c", "C-c")     # quit the agent
-    time.sleep(2)
-    runtime_args = source_agent_env(project, info["pane"], {
-        "FOREMAN_WORKTREE": job["path"], "FOREMAN_MAIN": job["main"],
-        "FOREMAN_TASK": job["task"], "FOREMAN_BRANCH": job["branch"],
-        "FOREMAN_MODE": job["mode"], "FOREMAN_ROLE": role,
-        "FOREMAN_PROMPT": job.get("brief", ""), "FOREMAN_PLAN": job.get("plan", ""),
-    }, Plan(False))
-    start_agent(info["handle"], info["pane"], info, settings, Plan(False), runtime_args)
+    # A terminal runs one agent and ends with it, so a restart is a new terminal: same name,
+    # same tab, a new address. The old one has to be gone first — names are unique among
+    # live terminals.
+    if info.get("address"):
+        stop_terminal(info["address"])
+        hc("rm", "--", info["address"], check=False)
+    info["address"] = None
+    write_job(job)
+
     note = args.note or ("Carry on with the plan. What is already in the worktree is your own "
                          "earlier work; pick up from there."
                          if role != "review" else
                          "Carry on reviewing. The changes in the worktree are impl's; you read, "
                          "you don't write.")
-    submit_prompt(info["handle"], note)
+    info["address"] = launch_agent(role, info, job=job, settings=settings, project=project,
+                                   prompt=note, prompt_name="restart", plan=Plan(False))
+    write_job(job)
     print(f"restarted {info['handle']} ({info['kind']}"
-          f"{'/' + info['effort'] if info.get('effort') else ''}, pane {info['pane']})")
+          f"{'/' + info['effort'] if info.get('effort') else ''}, terminal {info['address']})")
 
 
 def run_pre_done_hook(project: dict, job: dict, remove_worktree: bool) -> None:
@@ -828,14 +913,14 @@ def run_pre_done_hook(project: dict, job: dict, remove_worktree: bool) -> None:
                           env={**os.environ, **env})
     if proc.returncode != 0:
         raise Fail(f"pre_done hook {hook_path.name} exited {proc.returncode} — "
-                   "pane, worktree and ledger were kept")
+                   "terminals, worktree and ledger were kept")
 
 
 def cmd_done(args: argparse.Namespace) -> None:
     """Tear a job down. Every step is best-effort on purpose.
 
-    Cleanup runs against a world that has usually moved on: agents quit, panes get closed by
-    hand, a workspace is gone. Treating any of that as an error is how a job becomes
+    Cleanup runs against a world that has usually moved on: agents quit, terminals get killed
+    by hand, a worktree is gone. Treating any of that as an error is how a job becomes
     unremovable — the first dead agent aborts the command, and the worktree it was supposed
     to take with it stays behind with no ledger left to name it.
     """
@@ -844,62 +929,53 @@ def cmd_done(args: argparse.Namespace) -> None:
     project = load_project(job.get("project"), load_settings())
 
     for role, info in job["agents"].items():
-        # By pane, so a session someone restarted by hand is stopped rather than reported
-        # gone and left running while its pane is closed out from under it.
-        alive = run(["herdr", "agent", "get", info["pane"]], check=False).returncode == 0
-        if alive:
-            run(["herdr", "agent", "send-keys", info["pane"], "esc"], check=False)
-            time.sleep(0.5)
-            run(["herdr", "agent", "send-keys", info["pane"], "C-c", "C-c"], check=False)
+        alive = bool(info.get("address")) and stop_terminal(info["address"])
         print(f"{'stopped' if alive else 'already gone'}: {role} {info['handle']}")
-    time.sleep(1)
 
-    # Sessions have now flushed, while panes, worktree and ledger still exist. A project can
-    # archive transcripts or release containers here; failure must stop before data is lost.
+    # Sessions have now flushed, while the terminals (finished, still readable), worktree and
+    # ledger all exist. A project can archive transcripts or release containers here; failure
+    # must stop before data is lost.
     run_pre_done_hook(project, job, args.rm)
+
+    # Removing a terminal closes its tab in herdr-app, and the job's space with the last one.
+    for info in job["agents"].values():
+        if info.get("address"):
+            hc("rm", "--", info["address"], check=False)
 
     path = Path(job["path"])
     main = job.get("main")
     if not main:
         # ledgers written before `main` was recorded: fall back to the project config
-        try:
-            main = str(Path(load_project(job.get("project"), load_settings())["main"]).expanduser())
-        except Fail:
-            main = None
+        main = str(Path(project["main"]).expanduser())
 
     if args.rm:
-        # removing the workspace takes its panes with it (remove wants --workspace, not a path)
-        rm = run(["herdr", "worktree", "remove", "--workspace", job["workspace"], "--force"],
-                 check=False)
-        if rm.returncode != 0 and path.exists() and main:
-            # the workspace was already gone; the git worktree is still ours to remove
+        if path.exists():
             run(["git", "-C", main, "worktree", "remove", "--force", str(path)], check=False)
             run(["git", "-C", main, "worktree", "prune"], check=False)
         print(f"removed worktree {path}" if not path.exists() else
               f"could not remove worktree {path} — remove it by hand")
     else:
-        for info in job["agents"].values():
-            run(["herdr", "pane", "close", info["pane"]], check=False)
         print(f"worktree and changes kept: {path}")
 
     if args.rm and not path.exists():
         # a worktree removed without its branch leaves a name that blocks reusing the task.
         # -d refuses to drop unmerged work, which is the behaviour we want; say so and let
         # the human force it.
-        if not main:
-            print(f"kept branch {job['branch']} — could not locate the main worktree")
+        drop = run(["git", "-C", main, "branch", "-d", job["branch"]], check=False)
+        if drop.returncode == 0:
+            print(f"deleted branch {job['branch']}")
         else:
-            drop = run(["git", "-C", main, "branch", "-d", job["branch"]], check=False)
-            if drop.returncode == 0:
-                print(f"deleted branch {job['branch']}")
-            else:
-                print(f"kept branch {job['branch']} — {(drop.stderr or '').strip().splitlines()[0]
-                                                       if drop.stderr else 'git refused'}\n"
-                      f"  git -C {main} branch -D {job['branch']}   # to drop it anyway")
+            print(f"kept branch {job['branch']} — {(drop.stderr or '').strip().splitlines()[0]
+                                                   if drop.stderr else 'git refused'}\n"
+                  f"  git -C {main} branch -D {job['branch']}   # to drop it anyway")
 
     archive = JOBS.parent / "done"
     archive.mkdir(parents=True, exist_ok=True)
     job_path(task).rename(archive / f"{task}.json")
+    if job_dir(task).is_dir():
+        if (archive / task).exists():
+            shutil.rmtree(archive / task)
+        job_dir(task).rename(archive / task)
     print(f"ledger archived to {archive / (task + '.json')}")
 
 
@@ -940,7 +1016,7 @@ def main() -> None:
             sp.add_argument("--review-effort")
             sp.add_argument("--review-tier")
         sp.add_argument("--dry-run", action="store_true",
-                        help="print every herdr command and the rendered prompts, run nothing")
+                        help="print every hc command and the rendered prompts, run nothing")
         sp.set_defaults(fn=cmd_assign)
 
     add_common(modes.add_parser("solo", help="one agent, all the way to a PR"), pair=False)
@@ -948,8 +1024,8 @@ def main() -> None:
 
     sy = sub.add_parser("say", help="message your partner; the channel rules are enforced")
     sy.add_argument("words", nargs="+", metavar="[<to>] <text>",
-                    help="recipient: <task>[.impl|.rev], a herdr agent name, or a pane id "
-                         "like w2F:p1. Omit it inside a job's pane and your partner is used")
+                    help="recipient: <task>[.impl|.rev], or an hc address like t1b. Omit it "
+                         "inside a job's terminal and your partner is used")
     sy.add_argument("--now", action="store_true", help="deliver at once, don't wait for them")
     sy.set_defaults(fn=cmd_say)
 
@@ -962,7 +1038,7 @@ def main() -> None:
     rs.add_argument("--note")
     rs.set_defaults(fn=cmd_restart)
 
-    dn = sub.add_parser("done", help="wrap up: stop the agents, close the panes")
+    dn = sub.add_parser("done", help="wrap up: stop the agents, close their terminals")
     dn.add_argument("task")
     dn.add_argument("--rm", action="store_true", help="remove the worktree too")
     dn.set_defaults(fn=cmd_done)

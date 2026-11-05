@@ -37,8 +37,8 @@ chmod +x "$REPO/bin/foreman" "$REPO"/local/*.sh 2>/dev/null || true
 echo
 python3 -c 'import tomllib, sys; assert sys.version_info >= (3, 11)' \
   && echo "ok    python3 $(python3 -V | cut -d' ' -f2) + tomllib"
-command -v herdr >/dev/null && echo "ok    herdr $(herdr --version 2>/dev/null | head -1)" \
-  || echo "miss  herdr — foreman builds worktrees and starts agents entirely through it"
+command -v hc >/dev/null && echo "ok    $(hc --version 2>/dev/null | head -1) (herdr-core)" \
+  || echo "miss  hc — foreman starts and talks to every agent through herdr-core"
 command -v gh >/dev/null && echo "ok    gh (status needs it for the PR/CI column)" \
   || echo "note  no gh, so the PR column of foreman status stays empty"
 "$BIN/foreman" --version

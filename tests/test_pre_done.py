@@ -25,7 +25,7 @@ class PreDoneHookTest(unittest.TestCase):
             "mode": "solo",
             "brief": "do it",
             "plan": "",
-            "agents": {"solo": {"pane": "w1:p1", "kind": "pi"}},
+            "agents": {"solo": {"handle": "example", "address": "t7", "tab": "tb1", "kind": "pi"}},
         }
 
     def tearDown(self) -> None:
@@ -60,7 +60,7 @@ class PreDoneHookTest(unittest.TestCase):
         self.hook.write_text("#!/usr/bin/env bash\nexit 7\n", encoding="utf-8")
         self.hook.chmod(0o755)
 
-        with self.assertRaisesRegex(SystemExit, "pane, worktree and ledger were kept"):
+        with self.assertRaisesRegex(SystemExit, "terminals, worktree and ledger were kept"):
             self.run_hook({"hooks": {"pre_done": str(self.hook)}}, self.job, False)
 
 

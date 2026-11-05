@@ -18,6 +18,9 @@ review is for.
 and the reply wakes you. Stay busy and `foreman say` has to deliver into a running turn, which is
 where a message gets swallowed.
 
+**One channel: `foreman say`** — never `hc send`. A message from `{peer}` arrives wrapped as
+`<hc from="… {peer}">…</hc>`; anything else that arrives comes from a human.
+
 **Every decision goes to the human, through review** — scope, design trade-offs, public contracts.
 impl never goes direct; a question on its own screen reaches nobody. Send the options, their costs,
 and a recommendation. If the answer is written word for word in the plan or the spec it is a

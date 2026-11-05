@@ -15,25 +15,36 @@ max_chars    = 4000
 wait_idle_ms = 60000       # wait this long for them to be free; send anyway (--now skips it)
 
 
-# ── kind → how model / effort / tier become command-line flags ────────────────
-# Adding an agent kind means adding a section, not touching foreman. Values that
-# herdr agent start --kind accepts:
-# pi claude codex gemini cursor devin agy cline omp mastracode opencode copilot
-# kimi kiro droid amp grok hermes kilo qodercli maki
+# ── kind → how to start it, and how model / effort / tier become flags ───────
+# Adding an agent kind means adding a section, not touching foreman. The agent is started as
+#   command + args + flags + <source_env arguments> + <opening prompt>
+# so it must take its first message as its last argument and stay interactive.
+#
+#   command       defaults to the kind's own name
+#   trust_prompt  text of the agent's "trust this folder?" dialog; trust_keys accept it.
+#                 Agents draw that dialog without reporting a status, so the screen is the only
+#                 place to see it — and a fresh worktree is a folder the agent has never seen.
 
 [kinds.codex]
+command     = ["codex", "--no-daemon"]                      # hc: without it, commands run outside the terminal
 args        = ["--dangerously-bypass-approvals-and-sandbox"]
 model_flag  = ["-c", "model={model}"]                       # overrides ~/.codex/config.toml
 effort_flag = ["-c", "model_reasoning_effort={effort}"]
 tier_flag   = ["-c", "service_tier={tier}"]                 # --tier fast / flex
+trust_prompt = ["Trust this folder?", "Do you trust"]
+trust_keys   = ["enter"]                                    # "Trust and continue" is preselected
 
 [kinds.claude]
+command     = ["claude"]
 args        = ["--dangerously-skip-permissions"]
 model_flag  = ["--model", "{model}"]
 effort_flag = ["--effort", "{effort}"]                      # low|medium|high|xhigh|max
 tier_flag   = []                                            # no tier flag; empty means skipped
+trust_prompt = ["Yes, I trust this folder"]
+trust_keys   = ["down", "enter"]                            # "No, exit" is preselected
 
 [kinds.pi]
+command     = ["pi"]
 args        = []
 model_flag  = ["--model", "{model}"]                        # provider/model, e.g. anthropic/... or openai-codex/...
 effort_flag = ["--thinking", "{effort}"]                    # off|minimal|low|medium|high|xhigh|max

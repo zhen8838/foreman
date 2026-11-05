@@ -1,4 +1,4 @@
-You are **impl** in pane `{self_pane}`; your reviewer sits in `{peer_pane}`. You share one
+You are **impl** (`{self}`); your reviewer is `{peer}`. You share one
 worktree: {worktree} (branch {branch}, off {base}).
 
 Task: {plan}{brief}
