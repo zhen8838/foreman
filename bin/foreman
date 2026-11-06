@@ -104,7 +104,9 @@ def run_argv(name: str, cwd: Path, labels: dict[str, str], argv: list[str]) -> l
                  outlives the session that dispatched it.
     labels       herdr.space / herdr.tab are how herdr-app adopts a terminal it did not start
                  (herdr-app #290): an id it doesn't know becomes a new space or tab, and an
-                 unlabelled terminal is never shown. foreman.task / foreman.role let a
+                 unlabelled terminal is never shown. Terminals that share a tab id split it
+                 side by side, in the order the app adopts them; the labels are read once, so
+                 relabelling an adopted terminal does not move it. foreman.task / foreman.role let a
                  terminal find its own job.
     """
     out = ["run", "--bg", "--no-parent", "--name", name, "--cwd", str(cwd)]
@@ -532,7 +534,8 @@ def launch_agent(role: str, info: dict, *, job: dict, settings: dict, project: d
     prompt_file = workdir / f"{role}.{prompt_name}.md"
     text = launch_script(agent_argv(settings, info), agent_env(job, role), hook,
                          workdir / f"{role}.args.json")
-    labels = {"herdr.space": job["space"], "herdr.tab": info["tab"],
+    # a ledger from before a pair shared its tab still holds one tab id per role
+    labels = {"herdr.space": job["space"], "herdr.tab": job.get("tab") or info["tab"],
               "foreman.task": job["task"], "foreman.role": role}
     argv = run_argv(info["handle"], Path(job["path"]), labels,
                     ["bash", str(script), str(prompt_file)])
@@ -646,17 +649,18 @@ def cmd_assign(args: argparse.Namespace) -> None:
             if proc.returncode != 0:
                 raise Fail(f"post_worktree hook exited {proc.returncode} — nothing was dispatched")
 
-    # 3. the ledger: one herdr-app space for the job, one tab per role. Written before any
+    # 3. the ledger: one herdr-app space and one tab for the job — a pair splits that tab, impl
+    #    left and review right, because impl starts first. Written before any
     #    agent starts, so a dispatch that fails halfway still leaves `foreman done` a record
     #    of what to stop.
     agents = {}
     for role in MODE_ROLES[mode]:
         agents[role] = {"handle": task + ROLE_SUFFIX.get(role, ""), "address": None,
-                        "tab": new_id("tb"), **agent_spec(settings, mode, role, args)}
+                        **agent_spec(settings, mode, role, args)}
     job = {"task": task, "project": project["name"], "mode": mode, "branch": branch,
            "base": base, "path": str(wt), "main": str(main),
            "plan": plan_abs, "brief": args.prompt or "",
-           "space": new_id("sp"), "agents": agents,
+           "space": new_id("sp"), "tab": new_id("tb"), "agents": agents,
            "created": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
     if not p.dry:
         write_job(job)
@@ -697,7 +701,8 @@ def cmd_assign(args: argparse.Namespace) -> None:
     for role, info in agents.items():
         print(f"{info['address']:6} {role:7} {info['handle']}")
     first = next(iter(agents.values()))["handle"]
-    print(f"\nherdr-app  a space of its own, one tab per agent\n"
+    print(f"\nherdr-app  a space of its own, one tab"
+          f"{' split impl | review' if mode == 'pair' else ''}\n"
           f"message    foreman say {first} \"...\"\n"
           f"watch      hc read {first}\n"
           f"take over  hc attach {first}   # leave with Ctrl+\\")
@@ -937,7 +942,7 @@ def cmd_done(args: argparse.Namespace) -> None:
     # must stop before data is lost.
     run_pre_done_hook(project, job, args.rm)
 
-    # Removing a terminal closes its tab in herdr-app, and the job's space with the last one.
+    # Removing a terminal closes its pane in herdr-app, and the job's space with the last one.
     for info in job["agents"].values():
         if info.get("address"):
             hc("rm", "--", info["address"], check=False)

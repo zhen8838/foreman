@@ -25,7 +25,8 @@ class PreDoneHookTest(unittest.TestCase):
             "mode": "solo",
             "brief": "do it",
             "plan": "",
-            "agents": {"solo": {"handle": "example", "address": "t7", "tab": "tb1", "kind": "pi"}},
+            "tab": "tb1",
+            "agents": {"solo": {"handle": "example", "address": "t7", "kind": "pi"}},
         }
 
     def tearDown(self) -> None:

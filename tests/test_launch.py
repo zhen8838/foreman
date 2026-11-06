@@ -134,34 +134,43 @@ class WaitReadyTest(unittest.TestCase):
 
 
 class LaunchAgentTest(unittest.TestCase):
-    def test_terminal_is_detached_labelled_and_runs_the_script(self) -> None:
+    SETTINGS = {"kinds": {"claude": {"command": ["claude"], "args": ["--x"],
+                                     "effort_flag": ["--effort", "{effort}"]}}}
+
+    def _launch(self, jobs: Path, job: dict, info: dict):
         ns = runpy.run_path(str(FOREMAN))
         launch_agent = ns["launch_agent"]
         calls, waits = [], []
+
+        def fake_hc(*args, check=True):
+            calls.append(args)
+            return {"address": "t1b"}
+
+        with patch.dict(launch_agent.__globals__, {
+            "hc": fake_hc, "JOBS": jobs,
+            "wait_ready": lambda *a: waits.append(a),
+        }):
+            addr = launch_agent("review", info, job=job, settings=self.SETTINGS, project={},
+                                prompt="hello", prompt_name="prompt", plan=ns["Plan"](False))
+        return addr, calls, waits
+
+    @staticmethod
+    def _job(**extra) -> dict:
+        return {"task": "x", "path": "/wt", "main": "/main", "branch": "x", "mode": "pair",
+                "space": "sp1", "brief": "", "plan": "", **extra}
+
+    def test_terminal_is_detached_labelled_and_runs_the_script(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             jobs = Path(tmp) / "jobs"
-
-            def fake_hc(*args, check=True):
-                calls.append(args)
-                return {"address": "t1b"}
-
-            settings = {"kinds": {"claude": {"command": ["claude"], "args": ["--x"],
-                                             "effort_flag": ["--effort", "{effort}"]}}}
-            job = {"task": "x", "path": "/wt", "main": "/main", "branch": "x", "mode": "pair",
-                   "space": "sp1", "brief": "", "plan": ""}
-            info = {"handle": "x-rev", "tab": "tb2", "kind": "claude", "effort": "high"}
-            with patch.dict(launch_agent.__globals__, {
-                "hc": fake_hc, "JOBS": jobs,
-                "wait_ready": lambda *a: waits.append(a),
-            }):
-                addr = launch_agent("review", info, job=job, settings=settings, project={},
-                                    prompt="hello", prompt_name="prompt", plan=ns["Plan"](False))
+            info = {"handle": "x-rev", "kind": "claude", "effort": "high"}
+            # the job's one tab: impl and review split it
+            addr, calls, waits = self._launch(jobs, self._job(tab="tb1"), info)
 
             self.assertEqual(addr, "t1b")
             script, prompt = jobs / "x" / "review.launch.sh", jobs / "x" / "review.prompt.md"
             self.assertEqual(calls, [(
                 "run", "--bg", "--no-parent", "--name", "x-rev", "--cwd", "/wt",
-                "--label", "herdr.space=sp1", "--label", "herdr.tab=tb2",
+                "--label", "herdr.space=sp1", "--label", "herdr.tab=tb1",
                 "--label", "foreman.task=x", "--label", "foreman.role=review",
                 "--", "bash", str(script), str(prompt),
             )])
@@ -169,6 +178,13 @@ class LaunchAgentTest(unittest.TestCase):
             self.assertIn("exec claude --x --effort high", script.read_text())
             self.assertIn("export FOREMAN_ROLE=review", script.read_text())
             self.assertEqual(waits[0][:2], ("t1b", "x-rev"))
+
+    def test_ledger_with_a_tab_per_role_keeps_its_tabs(self) -> None:
+        # written before a pair shared its tab; a restart must go back where the role was
+        with tempfile.TemporaryDirectory() as tmp:
+            info = {"handle": "x-rev", "tab": "tb2", "kind": "claude"}
+            _, calls, _ = self._launch(Path(tmp) / "jobs", self._job(), info)
+        self.assertIn("herdr.tab=tb2", calls[0])
 
 
 if __name__ == "__main__":

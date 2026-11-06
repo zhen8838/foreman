@@ -37,8 +37,9 @@ foreman assign <solo|pair> (--plan <file> | --prompt "one sentence") \
 - Unsure what a dispatch will do? `--dry-run` prints every hc command, each role's launch
   script and the **fully rendered prompts**, and executes nothing.
 
-Report the handles back to the user: each job is a space of its own in herdr-app, one tab per
-agent, and `hc attach <handle>` takes one over from any terminal on this machine.
+Report the handles back to the user: each job is a space of its own in herdr-app with one tab
+(a pair splits it, impl left and review right), and `hc attach <handle>` takes one over from any
+terminal on this machine.
 
 ## The other commands
 

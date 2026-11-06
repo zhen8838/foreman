@@ -20,7 +20,7 @@ flowchart LR
         A["agent<br/>write → test → commit"]
     end
 
-    subgraph PAIR["new worktree · pair —— one space, two tabs"]
+    subgraph PAIR["new worktree · pair —— one tab, split impl | review"]
         direction TB
         IM["impl<br/>the only one writing"] -- "milestone done,<br/>asks for the gate" --> RV["review<br/>read-only, holds the gate"]
         RV -- "PASS / numbered findings" --> IM
@@ -155,10 +155,13 @@ The `t1b`-style address changes when `foreman restart` replaces the terminal.
 
 herdr-app shows a terminal only when it carries `herdr.space` / `herdr.tab` labels
 ([herdr-app #290](https://github.com/herdrdev/herdr-app/issues/290)), so Foreman gives each job
-a new space id and each role a new tab id. The space is named after the worktree folder. A pair
-gets two tabs, not a split: labels cannot place a split yet
-([herdr-app #313](https://github.com/herdrdev/herdr-app/issues/313)). `foreman done` removes the
-terminals, and herdr-app drops the space with them.
+a new space id and a new tab id. The space is named after the worktree folder. Terminals that
+share a tab are split side by side in the order herdr-app adopts them, so a pair shows impl on
+the left and review on the right. `foreman restart` starts a new terminal, and herdr-app adds it
+on the right: after `restart impl`, impl is on the right. Labels cannot place a pane yet
+([herdr-app #313](https://github.com/herdrdev/herdr-app/issues/313)), and herdr-app reads them
+only once, so changing the labels of a shown terminal does not move it. `foreman done` removes
+the terminals, and herdr-app drops the space with them.
 
 Terminals are started with `--no-parent`: a job outlives the session that dispatched it, and
 the dispatcher's input is not filled with a note for every turn the agents finish.
